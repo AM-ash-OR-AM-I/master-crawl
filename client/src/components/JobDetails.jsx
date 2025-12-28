@@ -12,7 +12,7 @@ function JobDetails({ job, onClose }) {
   const [activeTab, setActiveTab] = useState('overview');
   const [improving, setImproving] = useState(false);
   const [sitemapView, setSitemapView] = useState('tree'); // 'tree' or 'json'
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState({});
 
   useEffect(() => {
     fetchDetails();
@@ -21,6 +21,8 @@ function JobDetails({ job, onClose }) {
   const fetchDetails = async () => {
     try {
       const response = await axios.get(`/api/crawl/${job.id}`);
+      console.log('Job details response:', response.data);
+      console.log('Prompts data:', response.data.prompts);
       setDetails(response.data);
     } catch (error) {
       console.error('Error fetching job details:', error);
@@ -188,89 +190,104 @@ function JobDetails({ job, onClose }) {
 
           {activeTab === 'recommendations' && (
             <div className="space-y-4">
-              {details.systemPrompt && (
-                <Card>
-                  <CardContent className="p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm font-medium text-muted-foreground">Full System Prompt</label>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          const copyToClipboard = async () => {
-                            try {
-                              if (navigator.clipboard && navigator.clipboard.writeText) {
-                                await navigator.clipboard.writeText(details.systemPrompt);
-                                setCopied(true);
-                                setTimeout(() => setCopied(false), 2000);
-                              } else {
-                                // Fallback for older browsers
-                                const textArea = document.createElement('textarea');
-                                textArea.value = details.systemPrompt;
-                                textArea.style.position = 'fixed';
-                                textArea.style.left = '-999999px';
-                                document.body.appendChild(textArea);
-                                textArea.focus();
-                                textArea.select();
-                                try {
-                                  document.execCommand('copy');
-                                  setCopied(true);
-                                  setTimeout(() => setCopied(false), 2000);
-                                } catch (err) {
-                                  console.error('Fallback copy failed:', err);
-                                }
-                                document.body.removeChild(textArea);
-                              }
-                            } catch (err) {
-                              console.error('Failed to copy:', err);
-                              // Try fallback
-                              const textArea = document.createElement('textarea');
-                              textArea.value = details.systemPrompt;
-                              textArea.style.position = 'fixed';
-                              textArea.style.left = '-999999px';
-                              document.body.appendChild(textArea);
-                              textArea.focus();
-                              textArea.select();
+              {/* AI Improvement Prompt */}
+              {details.prompts && details.prompts.improvement && (
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-lg font-semibold">AI Sitemap Improvement Prompt</h3>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Copy this prompt and paste it into ChatGPT to get AI-powered sitemap optimization recommendations. 
+                      The prompt includes your current sitemap structure and detected issues.
+                    </p>
+                  </div>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-medium text-muted-foreground">
+                          Complete Prompt (System + User)
+                        </label>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const copyToClipboard = async () => {
                               try {
-                                document.execCommand('copy');
-                                setCopied(true);
-                                setTimeout(() => setCopied(false), 2000);
-                              } catch (fallbackErr) {
-                                console.error('Fallback copy failed:', fallbackErr);
+                                if (navigator.clipboard && navigator.clipboard.writeText) {
+                                  await navigator.clipboard.writeText(details.prompts.improvement.fullPrompt);
+                                  setCopied({ ...copied, improvement: true });
+                                  setTimeout(() => {
+                                    setCopied({ ...copied, improvement: false });
+                                  }, 2000);
+                                } else {
+                                  const textArea = document.createElement('textarea');
+                                  textArea.value = details.prompts.improvement.fullPrompt;
+                                  textArea.style.position = 'fixed';
+                                  textArea.style.left = '-999999px';
+                                  document.body.appendChild(textArea);
+                                  textArea.focus();
+                                  textArea.select();
+                                  try {
+                                    document.execCommand('copy');
+                                    setCopied({ ...copied, improvement: true });
+                                    setTimeout(() => {
+                                      setCopied({ ...copied, improvement: false });
+                                    }, 2000);
+                                  } catch (err) {
+                                    console.error('Fallback copy failed:', err);
+                                  }
+                                  document.body.removeChild(textArea);
+                                }
+                              } catch (err) {
+                                console.error('Failed to copy:', err);
                                 alert('Failed to copy. Please select and copy manually.');
                               }
-                              document.body.removeChild(textArea);
-                            }
-                          };
-                          copyToClipboard();
-                        }}
-                        className="gap-2"
-                      >
-                        {copied ? (
-                          <>
-                            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                            </svg>
-                            Copied!
-                          </>
-                        ) : (
-                          <>
-                            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                            </svg>
-                            Copy
-                          </>
-                        )}
-                      </Button>
-                    </div>
-                    <pre className="mt-2 p-3 rounded bg-muted text-xs overflow-auto font-mono whitespace-pre-wrap break-words max-h-96">
-                      {details.systemPrompt}
-                    </pre>
+                            };
+                            copyToClipboard();
+                          }}
+                          className="gap-2"
+                        >
+                          {copied.improvement ? (
+                            <>
+                              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                              Copied!
+                            </>
+                          ) : (
+                            <>
+                              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                              </svg>
+                              Copy Prompt
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                      <pre className="mt-2 p-3 rounded bg-muted text-xs overflow-auto font-mono whitespace-pre-wrap break-words max-h-96">
+                        {details.prompts.improvement.fullPrompt}
+                      </pre>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+              
+              {/* Show message if no prompts available */}
+              {(!details.prompts || !details.prompts.improvement) && (
+                <Card>
+                  <CardContent className="p-4">
+                    <p className="text-sm text-muted-foreground">
+                      No prompts available yet. The prompt will be generated automatically when you view job details after crawling.
+                    </p>
                   </CardContent>
                 </Card>
               )}
+              
+              {/* Recommendations Section */}
+              <div className="mt-6">
+                <h3 className="text-lg font-semibold mb-4">AI Recommendations</h3>
+              </div>
               {details.recommendations && details.recommendations.length > 0 ? (
                 <div className="space-y-4">
                   {details.recommendations.map((rec) => (

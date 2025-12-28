@@ -61,6 +61,25 @@ CREATE TABLE IF NOT EXISTS sitemaps (
   UNIQUE(job_id)
 );
 
+-- AI prompts table (stores chunk prompts and merge prompt)
+CREATE TABLE IF NOT EXISTS ai_prompts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id UUID NOT NULL REFERENCES crawl_jobs(id) ON DELETE CASCADE,
+  prompt_type TEXT NOT NULL, -- 'chunk' or 'merge'
+  chunk_index INTEGER, -- For chunk prompts, the index of the chunk
+  system_prompt TEXT NOT NULL,
+  user_prompt TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Unique constraint for chunks (job_id, prompt_type, chunk_index)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_prompts_chunk ON ai_prompts(job_id, prompt_type, chunk_index) 
+  WHERE prompt_type = 'chunk' AND chunk_index IS NOT NULL;
+
+-- Unique constraint for merge (only one merge prompt per job)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_prompts_merge ON ai_prompts(job_id, prompt_type) 
+  WHERE prompt_type = 'merge';
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_crawl_jobs_status ON crawl_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_crawl_jobs_domain ON crawl_jobs(domain);
@@ -68,6 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_pages_job_id ON pages(job_id);
 CREATE INDEX IF NOT EXISTS idx_pages_url ON pages(url);
 CREATE INDEX IF NOT EXISTS idx_ai_recommendations_job_id ON ai_recommendations(job_id);
 CREATE INDEX IF NOT EXISTS idx_sitemaps_job_id ON sitemaps(job_id);
+CREATE INDEX IF NOT EXISTS idx_ai_prompts_job_id ON ai_prompts(job_id);
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()

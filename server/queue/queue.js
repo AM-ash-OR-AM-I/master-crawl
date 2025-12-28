@@ -4,6 +4,8 @@ const { crawlWebsite } = require('../crawler/playwrightCrawler');
 const { processSitemap } = require('../ai/aiProcessor');
 const { pool } = require('../db/init');
 const { broadcastStatusUpdate } = require('../websocket/websocket');
+const { buildCanonicalSitemapTree } = require('../utils/sitemapTreeBuilder');
+const { detectStructuralIssues } = require('../utils/issueDetector');
 
 const connection = new Redis({
   host: process.env.REDIS_HOST || 'localhost',
@@ -50,14 +52,24 @@ const crawlWorker = new Worker(
       );
       await broadcastStatusUpdate(jobId);
       
-      // Build sitemap structure
-      const sitemap = buildSitemapStructure(pages);
+      // Build sitemap structure (legacy format for backward compatibility)
+      const legacySitemap = buildSitemapStructure(pages);
       
-      // Store original sitemap
+      // Build canonical sitemap tree (new format)
+      const canonicalTree = buildCanonicalSitemapTree(pages);
+      
+      // Detect structural issues
+      const structuralIssues = detectStructuralIssues(canonicalTree, pages);
+      
+      // Store original sitemap (legacy format for UI compatibility)
       await pool.query(
         'INSERT INTO sitemaps (job_id, original_sitemap) VALUES ($1, $2) ON CONFLICT (job_id) DO UPDATE SET original_sitemap = $2',
-        [jobId, JSON.stringify(sitemap)]
+        [jobId, JSON.stringify(legacySitemap)]
       );
+      
+      // Store canonical tree and issues in a metadata field (can be extended later)
+      // For now, we'll store it alongside - in production you might want a separate table
+      console.log(`📊 Sitemap analysis: ${canonicalTree._meta.total_pages} pages, max depth ${canonicalTree._meta.max_depth}, ${Object.keys(structuralIssues.duplication || {}).length} issue types detected`);
       
       // Update status to COMPLETED (AI improvement will be done manually via button)
       await pool.query(

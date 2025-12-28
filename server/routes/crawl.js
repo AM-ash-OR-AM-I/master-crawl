@@ -3,7 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../db/init');
 const { crawlQueue } = require('../queue/queue');
 const { getSitemap } = require('../utils/sitemapGenerator');
-const { getSystemPrompt, getFullPrompt } = require('../ai/aiProcessor');
+const { getSystemPrompt, getFullPrompt, generatePromptsWithData } = require('../ai/aiProcessor');
 
 const router = express.Router();
 
@@ -96,14 +96,35 @@ router.get('/:jobId', async (req, res) => {
       [jobId]
     );
     
-    const fullPrompt = getFullPrompt();
-    res.json({
+    // Generate prompts with sitemap data (if sitemap exists)
+    let prompts = null;
+    if (sitemapResult.rows[0] && sitemapResult.rows[0].original_sitemap) {
+      try {
+        // Try to get canonical tree and issues if available
+        // For now, just pass the sitemap - the function will handle conversion
+        prompts = generatePromptsWithData(sitemapResult.rows[0].original_sitemap);
+        console.log('Generated prompts with sitemap data:', {
+          hasImprovement: !!prompts.improvement,
+        });
+      } catch (error) {
+        console.error('Error generating prompts:', error);
+      }
+    }
+    
+    // Only include prompts if they exist
+    const responseData = {
       ...job,
       pagesCount: parseInt(pagesResult.rows[0].count),
       sitemap: sitemapResult.rows[0] ? { original_sitemap: sitemapResult.rows[0].original_sitemap } : null,
       recommendations: recsResult.rows || [],
-      systemPrompt: fullPrompt.full
-    });
+    };
+    
+    // Add prompts if they exist
+    if (prompts && prompts.improvement) {
+      responseData.prompts = prompts;
+    }
+    
+    res.json(responseData);
   } catch (error) {
     console.error('Error fetching crawl:', error);
     res.status(500).json({ error: error.message });
@@ -225,7 +246,7 @@ router.post('/:jobId/improve', async (req, res) => {
     
     // Process with AI
     const { processSitemap } = require('../ai/aiProcessor');
-    const { recommendations } = await processSitemap(jobId, sitemap);
+    const { recommendations, prompts } = await processSitemap(jobId, sitemap);
     
     // Store recommendations
     for (const rec of recommendations) {
@@ -233,6 +254,24 @@ router.post('/:jobId/improve', async (req, res) => {
         'INSERT INTO ai_recommendations (job_id, category, before, after, explanation) VALUES ($1, $2, $3, $4, $5)',
         [jobId, rec.category, JSON.stringify(rec.before), JSON.stringify(rec.after), rec.explanation]
       );
+    }
+    
+    // Store prompts - delete existing first, then insert new ones
+    if (prompts && prompts.improvement) {
+      try {
+        // Delete existing prompts for this job
+        await pool.query('DELETE FROM ai_prompts WHERE job_id = $1', [jobId]);
+        
+        // Store improvement prompt (single prompt)
+        await pool.query(
+          'INSERT INTO ai_prompts (job_id, prompt_type, chunk_index, system_prompt, user_prompt) VALUES ($1, $2, $3, $4, $5)',
+          [jobId, 'improvement', null, prompts.improvement.systemPrompt, prompts.improvement.userPrompt]
+        );
+        console.log(`Stored improvement prompt for job ${jobId}`);
+      } catch (error) {
+        console.error('Error storing prompts (table might not exist - run migration):', error.message);
+        // Don't fail the entire request if prompts can't be stored
+      }
     }
     
     // Update status back to COMPLETED
