@@ -293,37 +293,27 @@ ${JSON.stringify(issuesFormatted, null, 2)}
 
 📌 OUTPUT REQUIREMENTS (FILE-BASED):
 
-You MUST provide the following as downloadable file contents or code blocks:
+You MUST provide ONLY the Excel file as downloadable file contents or code blocks:
 
-1. new_sitemap.json - FULLY EXPANDED new sitemap tree (all URLs restructured, no truncation, no placeholders)
-2. new_sitemap.xlsx - Excel file with columns: URL, Title, Depth, Parent URL (provide as CSV format or structured data that can be converted to Excel)
-3. redirect_map.json - Complete redirect mapping: [ { from: "/old", to: "/new", status: 301, reason: "..." } ]
-4. indexing_rules.json - Indexing recommendations: [ { path: "/path", action: "noindex|index", reason: "..." } ]
-5. rationale.json - Brief explanation: { "summary": "...", "key_changes": [...], "expected_impact": "..." }
+new_sitemap.xlsx - Excel file with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes (provide as CSV format or structured data that can be converted to Excel)
 
 CRITICAL VALIDATION RULES:
-❌ If trees are summarized → RESPONSE IS INVALID
-❌ If ANY input URL from CURRENT SITEMAP TREE is missing from new_sitemap → RESPONSE IS INVALID
-❌ If redirect_map is incomplete → RESPONSE IS INVALID
-❌ If JSON is truncated or broken → RESPONSE IS INVALID
+❌ If Excel file is incomplete → RESPONSE IS INVALID
+❌ If data is truncated or broken → RESPONSE IS INVALID
 ❌ If branches are collapsed or placeholders used → RESPONSE IS INVALID
 
 ✅ CORRECT EXECUTION:
-- Every URL from the CURRENT SITEMAP TREE input MUST appear in new_sitemap (possibly restructured)
-- Every moved URL MUST have a redirect_map entry
-- All JSON files must be complete, valid, and downloadable
-- Use code blocks with language tags: \`\`\`json for each file
+- Every URL from the CURRENT SITEMAP TREE input MUST appear in the Excel file (possibly restructured)
+- Excel file must include all URLs with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes
+- Use code blocks with language tags: \`\`\`csv or \`\`\`json for the Excel data
 - Fully expand all tree branches - no collapsing, no placeholders
-- Excel file must include all URLs with columns: URL, Title, Depth, Parent URL
 
 ALTERNATIVE: If file generation is not possible, use CHUNKED RESPONSE mode:
-- Response 1: Full new_sitemap.json (all URLs, fully expanded)
-- Response 2: new_sitemap.xlsx data (CSV format or structured JSON with columns: URL, Title, Depth, Parent URL)
-- Response 3: redirect_map.json + indexing_rules.json + rationale.json
+- Provide new_sitemap.xlsx data in chunks (CSV format or structured JSON with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes)
 
-Each chunk must be clearly labeled (e.g., "NEW_SITEMAP — Part 1/1", "EXCEL_DATA — Part 1/1").
+Each chunk must be clearly labeled (e.g., "EXCEL_DATA — Part 1/3").
 
-Note: For Excel file, provide data in CSV format or as structured JSON array that can be easily converted to Excel with columns: URL, Title, Depth, Parent URL.
+Note: For Excel file, provide data in CSV format or as structured JSON array that can be easily converted to Excel with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes. Each row should represent a page, with the page title in the appropriate level column based on its depth in the hierarchy.
 
 Remember: Do NOT invent new content. Only restructure existing paths.`;
 
@@ -406,10 +396,12 @@ function generatePromptsWithData(sitemap, canonicalTree = null, structuralIssues
     // Always use file-based output format
     const userPrompt = `EXECUTION MODE: FILE-BASED OUTPUT (REQUIRED)
 
+This prompt can be used with ChatGPT (chat.openai.com) or Grok (x.ai/grok). Attach the sitemap.json file and paste this prompt.
+
 You MUST generate downloadable files to avoid truncation, partial output, or broken JSON.
 
 INPUTS:
-1. Current sitemap tree (JSON)
+1. Current sitemap tree (JSON) - attached as sitemap.json file
 2. Detected structural issues (JSON)
 
 SITE CONTEXT:
@@ -420,52 +412,41 @@ SITE CONTEXT:
 - Maximum depth allowed: ${maxDepth}
 
 TASKS:
-1. Propose a NEW sitemap tree that addresses the structural issues
+1. Analyze the current sitemap structure and identify improvements
 2. Ensure depth ≤ ${maxDepth}
 3. Consolidate flat or fragmented sections into logical hubs
 4. Return a redirect map (301) for all moved paths
 5. List index/noindex recommendations
 6. Explain structural changes briefly
 
-CURRENT SITEMAP TREE:
-${JSON.stringify(treeToUse, null, 2)}
+NOTE: The sitemap.json file is attached to this conversation. Please analyze the structure from the attached file.
 
 STRUCTURAL ISSUES:
 ${JSON.stringify(issuesFormatted, null, 2)}
 
 📌 OUTPUT REQUIREMENTS (FILE-BASED):
 
-You MUST provide the following as downloadable file contents or code blocks:
+You MUST provide ONLY the Excel file as downloadable file contents or code blocks:
 
-1. new_sitemap.json - FULLY EXPANDED new sitemap tree (all URLs restructured, no truncation, no placeholders)
-2. new_sitemap.xlsx - Excel file with columns: URL, Title, Depth, Parent URL (provide as CSV format or structured data that can be converted to Excel)
-3. redirect_map.json - Complete redirect mapping: [ { from: "/old", to: "/new", status: 301, reason: "..." } ]
-4. indexing_rules.json - Indexing recommendations: [ { path: "/path", action: "noindex|index", reason: "..." } ]
-5. rationale.json - Brief explanation: { "summary": "...", "key_changes": [...], "expected_impact": "..." }
+new_sitemap.xlsx - Excel file with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes (provide as CSV format or structured data that can be converted to Excel)
 
 CRITICAL VALIDATION RULES:
-❌ If trees are summarized → RESPONSE IS INVALID
-❌ If ANY input URL from CURRENT SITEMAP TREE is missing from new_sitemap → RESPONSE IS INVALID
-❌ If redirect_map is incomplete → RESPONSE IS INVALID
-❌ If JSON is truncated or broken → RESPONSE IS INVALID
+❌ If Excel file is incomplete → RESPONSE IS INVALID
+❌ If data is truncated or broken → RESPONSE IS INVALID
 ❌ If branches are collapsed or placeholders used → RESPONSE IS INVALID
 
 ✅ CORRECT EXECUTION:
-- Every URL from the CURRENT SITEMAP TREE input MUST appear in new_sitemap (possibly restructured)
-- Every moved URL MUST have a redirect_map entry
-- All JSON files must be complete, valid, and downloadable
-- Use code blocks with language tags: \`\`\`json for each file
+- Every URL from the CURRENT SITEMAP TREE input MUST appear in the Excel file (possibly restructured)
+- Excel file must include all URLs with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes
+- Use code blocks with language tags: \`\`\`csv or \`\`\`json for the Excel data
 - Fully expand all tree branches - no collapsing, no placeholders
-- Excel file must include all URLs with columns: URL, Title, Depth, Parent URL
 
 ALTERNATIVE: If file generation is not possible, use CHUNKED RESPONSE mode:
-- Response 1: Full new_sitemap.json (all URLs, fully expanded)
-- Response 2: new_sitemap.xlsx data (CSV format or structured JSON with columns: URL, Title, Depth, Parent URL)
-- Response 3: redirect_map.json + indexing_rules.json + rationale.json
+- Provide new_sitemap.xlsx data in chunks (CSV format or structured JSON with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes)
 
-Each chunk must be clearly labeled (e.g., "NEW_SITEMAP — Part 1/1", "EXCEL_DATA — Part 1/1").
+Each chunk must be clearly labeled (e.g., "EXCEL_DATA — Part 1/3").
 
-Note: For Excel file, provide data in CSV format or as structured JSON array that can be easily converted to Excel with columns: URL, Title, Depth, Parent URL.
+Note: For Excel file, provide data in CSV format or as structured JSON array that can be easily converted to Excel with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes. Each row should represent a page, with the page title in the appropriate level column based on its depth in the hierarchy.
 
 Remember: Do NOT invent new content. Only restructure existing paths.`;
     

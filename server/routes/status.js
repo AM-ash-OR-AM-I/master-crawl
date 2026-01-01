@@ -1,5 +1,5 @@
 const express = require('express');
-const { pool } = require('../db/init');
+const { pool, queryWithRetry } = require('../db/init');
 
 const router = express.Router();
 
@@ -9,7 +9,7 @@ const router = express.Router();
  */
 router.get('/', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await queryWithRetry(
       `SELECT 
         cj.id,
         cj.domain,

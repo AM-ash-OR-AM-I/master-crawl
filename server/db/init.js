@@ -8,9 +8,11 @@ const pool = new Pool({
   database: process.env.DB_NAME || 'sitemap_generator',
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  max: parseInt(process.env.DB_POOL_MAX || '50'), // Increased for concurrent crawling
+  idleTimeoutMillis: 60000, // 60 seconds
+  connectionTimeoutMillis: 15000, // Increased from 2s to 15s
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 // Test connection
@@ -21,6 +23,32 @@ pool.on('connect', () => {
 pool.on('error', (err) => {
   console.error('❌ PostgreSQL error:', err);
 });
+
+/**
+ * Execute a query with retry logic for connection timeouts
+ */
+async function queryWithRetry(text, params, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await pool.query(text, params);
+    } catch (error) {
+      const isConnectionError = 
+        error.message.includes('connection timeout') ||
+        error.message.includes('Connection terminated') ||
+        error.message.includes('Connection terminated unexpectedly') ||
+        error.code === 'ECONNRESET' ||
+        error.code === 'ETIMEDOUT';
+      
+      if (isConnectionError && i < retries - 1) {
+        const delay = Math.min(1000 * Math.pow(2, i), 5000); // Exponential backoff, max 5s
+        console.warn(`⚠️ Database connection error (attempt ${i + 1}/${retries}), retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 async function initDatabase() {
   try {
@@ -47,5 +75,5 @@ async function initDatabase() {
   }
 }
 
-module.exports = { pool, initDatabase };
+module.exports = { pool, initDatabase, queryWithRetry };
 

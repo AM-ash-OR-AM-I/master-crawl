@@ -223,7 +223,7 @@ function calculatePriority(depth) {
 }
 
 /**
- * Generate Excel sitemap from pages
+ * Generate Excel sitemap from pages with hierarchical structure
  */
 function generateExcelSitemap(pages, baseUrl) {
   // Clean up titles
@@ -246,23 +246,108 @@ function generateExcelSitemap(pages, baseUrl) {
       }
     }
     return {
-      'URL': page.url,
-      'Title': title,
-      'Depth': page.depth,
-      'Parent URL': page.parentUrl || ''
+      url: page.url,
+      title: title,
+      depth: page.depth,
+      parentUrl: page.parentUrl || ''
     };
   });
 
+  // Build tree structure
+  const pageMap = new Map();
+  const rootNodes = [];
+  
+  // Create map of all pages
+  cleanedPages.forEach(page => {
+    pageMap.set(page.url, {
+      ...page,
+      children: []
+    });
+  });
+  
+  // Build parent-child relationships
+  cleanedPages.forEach(page => {
+    const node = pageMap.get(page.url);
+    if (page.parentUrl && pageMap.has(page.parentUrl)) {
+      const parent = pageMap.get(page.parentUrl);
+      if (!parent.children) parent.children = [];
+      parent.children.push(node);
+    } else if (page.depth === 0 || !page.parentUrl) {
+      rootNodes.push(node);
+    } else {
+      // Orphan page - add to root
+      rootNodes.push(node);
+    }
+  });
+  
+  // If no root nodes found, use the first page
+  if (rootNodes.length === 0 && cleanedPages.length > 0) {
+    rootNodes.push(pageMap.get(cleanedPages[0].url));
+  }
+  
+  // Flatten tree into hierarchical rows
+  const hierarchicalRows = [];
+  
+  function traverseTree(node, levelPath = []) {
+    if (!node) return;
+    
+    // Add current node's title to the path
+    const currentPath = [...levelPath, node.title];
+    
+    // Create array with 7 levels, filling from the path
+    const pathArray = [];
+    for (let i = 0; i < 7; i++) {
+      pathArray[i] = currentPath[i] || '';
+    }
+    
+    // Create row with hierarchical structure showing full path from root
+    const row = {
+      'Top Level Navigation Landing Page (1st level)': pathArray[0] || '',
+      '2nd Level Subpage': pathArray[1] || '',
+      '3rd Level Subpage': pathArray[2] || '',
+      '4th Level Subpage': pathArray[3] || '',
+      '5th Level Subpage': pathArray[4] || '',
+      '6th Level Subpage': pathArray[5] || '',
+      '7th Level Subpage': pathArray[6] || '',
+      'Notes': ''
+    };
+    
+    hierarchicalRows.push(row);
+    
+    // Recursively process children
+    if (node.children && node.children.length > 0) {
+      // Sort children by depth and title for consistent ordering
+      const sortedChildren = [...node.children].sort((a, b) => {
+        if (a.depth !== b.depth) return a.depth - b.depth;
+        return (a.title || '').localeCompare(b.title || '');
+      });
+      
+      sortedChildren.forEach(child => {
+        // Pass the current path to children
+        traverseTree(child, currentPath);
+      });
+    }
+  }
+  
+  // Traverse all root nodes
+  rootNodes.forEach(node => {
+    traverseTree(node);
+  });
+  
   // Create workbook and worksheet
   const workbook = XLSX.utils.book_new();
-  const worksheet = XLSX.utils.json_to_sheet(cleanedPages);
+  const worksheet = XLSX.utils.json_to_sheet(hierarchicalRows);
   
   // Set column widths
   worksheet['!cols'] = [
-    { wch: 50 }, // URL
-    { wch: 30 }, // Title
-    { wch: 10 }, // Depth
-    { wch: 50 }  // Parent URL
+    { wch: 40 }, // Top Level Navigation Landing Page (1st level)
+    { wch: 35 }, // 2nd Level Subpage
+    { wch: 35 }, // 3rd Level Subpage
+    { wch: 35 }, // 4th Level Subpage
+    { wch: 35 }, // 5th Level Subpage
+    { wch: 35 }, // 6th Level Subpage
+    { wch: 35 }, // 7th Level Subpage
+    { wch: 30 }  // Notes
   ];
   
   // Add worksheet to workbook

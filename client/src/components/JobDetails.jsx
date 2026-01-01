@@ -196,7 +196,7 @@ function JobDetails({ job, onClose }) {
                   <div>
                     <h3 className="text-lg font-semibold">AI Sitemap Improvement Prompt</h3>
                     <p className="text-sm text-muted-foreground mt-1">
-                      Copy this prompt and paste it into ChatGPT to get AI-powered sitemap optimization recommendations. 
+                      Copy this prompt and paste it into ChatGPT or Grok to get AI-powered sitemap optimization recommendations. 
                       The prompt includes your current sitemap structure and detected issues.
                     </p>
                   </div>
@@ -208,7 +208,7 @@ function JobDetails({ job, onClose }) {
                         <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                         </svg>
-                        How to Use This Prompt with ChatGPT
+                        How to Use This Prompt with ChatGPT or Grok
                       </h4>
                       <ol className="space-y-3 text-sm">
                         <li className="flex gap-3">
@@ -240,9 +240,9 @@ function JobDetails({ job, onClose }) {
                         <li className="flex gap-3">
                           <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500 text-white flex items-center justify-center text-xs font-semibold">2</span>
                           <div className="flex-1">
-                            <p className="font-medium mb-1">Open ChatGPT and start a new conversation</p>
+                            <p className="font-medium mb-1">Open ChatGPT or Grok and start a new conversation</p>
                             <p className="text-muted-foreground text-xs">
-                              Go to <a href="https://chat.openai.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 underline">chat.openai.com</a> and create a new chat session.
+                              Go to <a href="https://chat.openai.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 underline">chat.openai.com</a> (ChatGPT) or <a href="https://x.ai/grok" target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 underline">x.ai/grok</a> (Grok) and create a new chat session.
                             </p>
                           </div>
                         </li>
@@ -251,10 +251,10 @@ function JobDetails({ job, onClose }) {
                           <div className="flex-1">
                             <p className="font-medium mb-1">Attach the sitemap.json file</p>
                             <p className="text-muted-foreground text-xs mb-2">
-                              In ChatGPT, click the attachment icon (📎) and upload the downloaded <code className="px-1 py-0.5 bg-muted rounded text-xs">sitemap.json</code> file.
+                              In ChatGPT or Grok, click the attachment icon (📎) and upload the downloaded <code className="px-1 py-0.5 bg-muted rounded text-xs">sitemap.json</code> file.
                             </p>
                             <div className="text-xs text-muted-foreground italic">
-                              Note: ChatGPT will read the file contents automatically.
+                              Note: The AI will read the file contents automatically.
                             </div>
                           </div>
                         </li>
@@ -263,7 +263,7 @@ function JobDetails({ job, onClose }) {
                           <div className="flex-1">
                             <p className="font-medium mb-1">Copy and paste the prompt</p>
                             <p className="text-muted-foreground text-xs">
-                              Copy the complete prompt below (click "Copy Prompt" button) and paste it into ChatGPT. The prompt includes instructions for analyzing the attached sitemap.json file.
+                              Copy the complete prompt below (click "Copy Prompt" button) and paste it into ChatGPT or Grok. The prompt includes instructions for analyzing the attached sitemap.json file.
                             </p>
                           </div>
                         </li>
@@ -272,9 +272,9 @@ function JobDetails({ job, onClose }) {
                           <div className="flex-1">
                             <p className="font-medium mb-1">Review the AI recommendations</p>
                             <p className="text-muted-foreground text-xs">
-                              ChatGPT will analyze your sitemap structure and provide recommendations for improvements, including a new sitemap tree, redirect mappings, and indexing rules.
+                              ChatGPT or Grok will analyze your sitemap structure and provide recommendations for improvements, including redirect mappings, indexing rules, and an Excel file with the restructured sitemap.
                             </p>
-                            <p>
+                            <p className="text-xs text-muted-foreground mt-2">
                               Note: If the response stops mid-way, just write "continue" and it will continue the response.
                             </p>
                           </div>

@@ -52,9 +52,15 @@ function TreeNode({ node, level = 0, isLast = false, parentPath = [] }) {
             <span className="w-4" />
           )}
           <span className={cn(
-            'text-sm truncate font-sans',
-            level === 0 && 'font-semibold'
+            'text-sm truncate font-sans flex items-center gap-1.5',
+            level === 0 && 'font-semibold',
+            node.isFragment && 'text-muted-foreground'
           )}>
+            {node.isFragment && (
+              <span className="text-xs text-muted-foreground" title="Page Section">
+                #
+              </span>
+            )}
             {node.title || node.url || 'Untitled'}
           </span>
           {node.url && node.url !== node.title && (
