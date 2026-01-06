@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import JobDetails from './JobDetails';
-import { Card, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
+import { Card, CardContent } from './ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 
 function CrawlDashboard({ jobs, onRefresh }) {
@@ -131,12 +131,56 @@ function CrawlDashboard({ jobs, onRefresh }) {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Badge
-                      variant="secondary"
-                      className={statusColors[job.status] || ''}
-                    >
-                      {formatStatus(job.status)}
-                    </Badge>
+                    <div className="flex items-center gap-2">
+                      <Badge
+                        variant="secondary"
+                        className={statusColors[job.status] || ''}
+                      >
+                        {formatStatus(job.status)}
+                      </Badge>
+                      {/* Show warning indicator if completed with errors */}
+                      {job.status === 'COMPLETED' && job.error && (
+                        <span 
+                          className="text-amber-500" 
+                          title={job.error}
+                        >
+                          <svg
+                            className="h-4 w-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                            />
+                          </svg>
+                        </span>
+                      )}
+                      {/* Show error indicator if failed */}
+                      {job.status === 'FAILED' && (
+                        <span 
+                          className="text-red-500" 
+                          title={job.error || 'Crawl failed'}
+                        >
+                          <svg
+                            className="h-4 w-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
+                            />
+                          </svg>
+                        </span>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell className="text-right">
                     {job.status === 'COMPLETED' || job.pagesCrawled > 0 ? (

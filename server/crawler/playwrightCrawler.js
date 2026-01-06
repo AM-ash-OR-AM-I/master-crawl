@@ -1,9 +1,10 @@
-const { chromium } = require('playwright');
-const robotsParser = require('robots-parser');
-const { URL } = require('url');
-const { pool, queryWithRetry } = require('../db/init');
+const { chromium } = require("playwright");
+const robotsParser = require("robots-parser");
+const { URL } = require("url");
+const { pool, queryWithRetry } = require("../db/init");
 
-let browserInstance = null;
+// Browser is created fresh for each crawl job to ensure clean state
+// and proper resource cleanup
 
 // Configuration constants
 const MAX_RETRIES = 3;
@@ -23,16 +24,17 @@ function normalizeUrl(url, preserveHash = false) {
     // Also preserve hash fragments (like #section-name) for page sections
     if (!preserveHash) {
       // Check if it's a hash route (#/) or a meaningful fragment
-      const isHashRoute = u.hash && u.hash.startsWith('#/');
-      const isFragment = u.hash && u.hash.length > 1 && !u.hash.startsWith('#/');
-      
+      const isHashRoute = u.hash && u.hash.startsWith("#/");
+      const isFragment =
+        u.hash && u.hash.length > 1 && !u.hash.startsWith("#/");
+
       // Only remove hash if it's not a route or fragment
       if (!isHashRoute && !isFragment) {
-        u.hash = '';
+        u.hash = "";
       }
     }
-    u.search = '';
-    return u.href.replace(/\/$/, '');
+    u.search = "";
+    return u.href.replace(/\/$/, "");
   } catch {
     return null;
   }
@@ -50,44 +52,547 @@ function sameDomain(a, b) {
 }
 
 /**
+ * Select a diverse sample of URLs from a large sitemap
+ * Prioritizes: homepage, then spreads across different path prefixes
+ */
+function selectSampleUrls(urls, sampleSize) {
+  if (urls.length <= sampleSize) {
+    return urls;
+  }
+
+  const selected = new Set();
+  const pathPrefixes = new Map(); // Track URLs by their first path segment
+
+  // First, find and add the homepage
+  for (const url of urls) {
+    try {
+      const urlObj = new URL(url);
+      if (urlObj.pathname === "/" || urlObj.pathname === "") {
+        selected.add(url);
+        break;
+      }
+    } catch {}
+  }
+
+  // Group URLs by their first path segment
+  for (const url of urls) {
+    try {
+      const urlObj = new URL(url);
+      const pathParts = urlObj.pathname.split("/").filter((p) => p);
+      const prefix = pathParts[0] || "root";
+
+      if (!pathPrefixes.has(prefix)) {
+        pathPrefixes.set(prefix, []);
+      }
+      pathPrefixes.get(prefix).push(url);
+    } catch {}
+  }
+
+  // Distribute sample across path prefixes
+  const prefixArray = Array.from(pathPrefixes.entries());
+  let round = 0;
+
+  while (selected.size < sampleSize && round < 100) {
+    for (const [prefix, prefixUrls] of prefixArray) {
+      if (selected.size >= sampleSize) break;
+
+      // Pick one URL from each prefix per round
+      const urlIndex = round % prefixUrls.length;
+      const url = prefixUrls[urlIndex];
+
+      if (!selected.has(url)) {
+        selected.add(url);
+      }
+    }
+    round++;
+  }
+
+  return Array.from(selected);
+}
+
+/**
  * Load robots.txt
  */
 async function loadRobots(url) {
   try {
-    const https = require('https');
-    const http = require('http');
+    const https = require("https");
+    const http = require("http");
     const u = new URL(url);
     const robotsUrl = `${u.origin}/robots.txt`;
-    
+
     return new Promise((resolve) => {
-      const client = u.protocol === 'https:' ? https : http;
+      const client = u.protocol === "https:" ? https : http;
       const req = client.get(robotsUrl, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
           try {
             const robots = robotsParser(robotsUrl, data);
-            console.log('🤖 robots.txt loaded');
+            console.log("🤖 robots.txt loaded");
             resolve(robots);
           } catch {
-            resolve({ isAllowed: () => true });
+            resolve({ isAllowed: () => true, getSitemaps: () => [] });
           }
         });
       });
-      req.on('error', () => {
-        console.log('⚠️ robots.txt not found, crawling allowed');
-        resolve({ isAllowed: () => true });
+      req.on("error", () => {
+        console.log("⚠️ robots.txt not found, crawling allowed");
+        resolve({ isAllowed: () => true, getSitemaps: () => [] });
       });
       req.setTimeout(5000, () => {
         req.destroy();
-        console.log('⚠️ robots.txt timeout, crawling allowed');
-        resolve({ isAllowed: () => true });
+        console.log("⚠️ robots.txt timeout, crawling allowed");
+        resolve({ isAllowed: () => true, getSitemaps: () => [] });
       });
     });
   } catch {
-    console.log('⚠️ robots.txt not found, crawling allowed');
-    return { isAllowed: () => true };
+    console.log("⚠️ robots.txt not found, crawling allowed");
+    return { isAllowed: () => true, getSitemaps: () => [] };
   }
+}
+
+/**
+ * Fetch and parse sitemap.xml to discover URLs
+ * Supports multiple formats:
+ * - Standard XML sitemaps (urlset with loc tags)
+ * - Sitemap index files (sitemapindex)
+ * - Gzipped sitemaps (.xml.gz)
+ * - RSS/Atom feeds as sitemaps
+ * - Plain text sitemaps (one URL per line)
+ * - Sitemaps with namespaces (xmlns)
+ */
+async function fetchSitemap(baseUrl, robots = null) {
+  const https = require("https");
+  const http = require("http");
+  const zlib = require("zlib");
+
+  const discoveredUrls = new Set();
+  const errors = [];
+  const processedSitemaps = new Set(); // Track processed sitemaps to avoid duplicates
+
+  // Get sitemap URLs from robots.txt or use defaults
+  let sitemapUrls = [];
+  const baseUrlObj = new URL(baseUrl);
+
+  if (robots && typeof robots.getSitemaps === "function") {
+    try {
+      const robotsSitemaps = robots.getSitemaps() || [];
+      if (robotsSitemaps.length > 0) {
+        console.log(
+          `📍 Found ${robotsSitemaps.length} sitemap(s) in robots.txt`
+        );
+        // Resolve relative URLs to absolute URLs
+        for (const sitemapUrl of robotsSitemaps) {
+          try {
+            // Check if it's already absolute
+            if (
+              sitemapUrl.startsWith("http://") ||
+              sitemapUrl.startsWith("https://")
+            ) {
+              sitemapUrls.push(sitemapUrl);
+            } else {
+              // It's relative - resolve against base URL
+              const absoluteUrl = new URL(sitemapUrl, baseUrl).href;
+              sitemapUrls.push(absoluteUrl);
+              console.log(
+                `   ↪️ Resolved relative sitemap: ${sitemapUrl} -> ${absoluteUrl}`
+              );
+            }
+          } catch (e) {
+            console.warn(
+              `   ⚠️ Invalid sitemap URL in robots.txt: ${sitemapUrl}`
+            );
+          }
+        }
+      }
+    } catch {
+      // Ignore errors getting sitemaps from robots
+    }
+  }
+
+  // Add default sitemap locations if none found in robots.txt
+  if (sitemapUrls.length === 0) {
+    sitemapUrls = [
+      `${baseUrlObj.origin}/sitemap.xml`,
+      `${baseUrlObj.origin}/sitemap_index.xml`,
+      `${baseUrlObj.origin}/sitemap-index.xml`,
+      `${baseUrlObj.origin}/sitemap.xml.gz`,
+      `${baseUrlObj.origin}/sitemaps.xml`,
+      `${baseUrlObj.origin}/sitemap1.xml`,
+      `${baseUrlObj.origin}/post-sitemap.xml`,
+      `${baseUrlObj.origin}/page-sitemap.xml`,
+    ];
+  }
+
+  /**
+   * Extract URLs from XML content using multiple patterns
+   * Handles various sitemap formats including those with namespaces
+   */
+  function extractUrlsFromXml(content) {
+    const urls = [];
+
+    // Pattern 1: Standard <loc> tags (handles namespaces too)
+    // Matches: <loc>url</loc>, <ns:loc>url</ns:loc>, etc.
+    const locPattern =
+      /<(?:[a-z0-9]+:)?loc[^>]*>([^<]+)<\/(?:[a-z0-9]+:)?loc>/gi;
+    let match;
+    while ((match = locPattern.exec(content)) !== null) {
+      const url = match[1].trim();
+      if (url) {
+        // Decode HTML entities
+        const decodedUrl = url
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'");
+        urls.push(decodedUrl);
+      }
+    }
+
+    // Pattern 2: CDATA sections within loc tags
+    const cdataPattern =
+      /<(?:[a-z0-9]+:)?loc[^>]*>\s*<!\[CDATA\[([^\]]+)\]\]>\s*<\/(?:[a-z0-9]+:)?loc>/gi;
+    while ((match = cdataPattern.exec(content)) !== null) {
+      const url = match[1].trim();
+      if (url && !urls.includes(url)) {
+        urls.push(url);
+      }
+    }
+
+    // Pattern 3: RSS/Atom feed links
+    const linkPattern = /<link[^>]*>([^<]+)<\/link>/gi;
+    while ((match = linkPattern.exec(content)) !== null) {
+      const url = match[1].trim();
+      if (url && url.startsWith("http") && !urls.includes(url)) {
+        urls.push(url);
+      }
+    }
+
+    // Pattern 4: Atom href attributes
+    const hrefPattern = /<link[^>]+href=["']([^"']+)["'][^>]*\/?>/gi;
+    while ((match = hrefPattern.exec(content)) !== null) {
+      const url = match[1].trim();
+      if (url && url.startsWith("http") && !urls.includes(url)) {
+        urls.push(url);
+      }
+    }
+
+    return urls;
+  }
+
+  /**
+   * Extract sitemap URLs from sitemap index
+   */
+  function extractSitemapsFromIndex(content) {
+    const sitemaps = [];
+
+    // Pattern for sitemap index entries
+    const locPattern =
+      /<(?:[a-z0-9]+:)?loc[^>]*>([^<]+)<\/(?:[a-z0-9]+:)?loc>/gi;
+    let match;
+    while ((match = locPattern.exec(content)) !== null) {
+      const url = match[1]
+        .trim()
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">");
+      if (
+        (url && url.includes("sitemap")) ||
+        url.endsWith(".xml") ||
+        url.endsWith(".xml.gz")
+      ) {
+        sitemaps.push(url);
+      } else if (url.startsWith("http")) {
+        // Could be a sitemap URL without 'sitemap' in name
+        sitemaps.push(url);
+      }
+    }
+
+    return sitemaps;
+  }
+
+  /**
+   * Check if content is a sitemap index
+   */
+  function isSitemapIndex(content) {
+    const lowerContent = content.toLowerCase();
+    return (
+      lowerContent.includes("<sitemapindex") ||
+      lowerContent.includes(":sitemapindex") ||
+      (lowerContent.includes("<sitemap>") &&
+        lowerContent.includes("</sitemap>"))
+    );
+  }
+
+  /**
+   * Check if content is a URL set sitemap
+   */
+  function isUrlSetSitemap(content) {
+    const lowerContent = content.toLowerCase();
+    return (
+      lowerContent.includes("<urlset") ||
+      lowerContent.includes(":urlset") ||
+      (lowerContent.includes("<url>") && lowerContent.includes("<loc>"))
+    );
+  }
+
+  /**
+   * Parse plain text sitemap (one URL per line)
+   */
+  function parseTextSitemap(content) {
+    const urls = [];
+    const lines = content.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed && trimmed.startsWith("http")) {
+        try {
+          new URL(trimmed);
+          urls.push(trimmed);
+        } catch {
+          // Skip invalid URLs
+        }
+      }
+    }
+    return urls;
+  }
+
+  /**
+   * Fetch a single sitemap URL
+   */
+  async function fetchSingleSitemap(sitemapUrl, depth = 0) {
+    // Prevent infinite recursion
+    if (depth > 5) {
+      console.warn(`⚠️ Sitemap depth limit reached for ${sitemapUrl}`);
+      return;
+    }
+
+    // Skip if already processed
+    if (processedSitemaps.has(sitemapUrl)) {
+      return;
+    }
+    processedSitemaps.add(sitemapUrl);
+
+    return new Promise((resolve) => {
+      try {
+        const u = new URL(sitemapUrl);
+        const client = u.protocol === "https:" ? https : http;
+        const isGzipped = sitemapUrl.endsWith(".gz");
+
+        const requestOptions = {
+          hostname: u.hostname,
+          port: u.port || (u.protocol === "https:" ? 443 : 80),
+          path: u.pathname + u.search,
+          method: "GET",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; SitemapCrawler/1.0)",
+            Accept: "application/xml, text/xml, text/plain, */*",
+            "Accept-Encoding": isGzipped ? "gzip" : "gzip, deflate",
+          },
+        };
+
+        const req = client.request(requestOptions, (res) => {
+          // Handle redirects (up to 5)
+          if (
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
+            const redirectUrl = res.headers.location.startsWith("http")
+              ? res.headers.location
+              : new URL(res.headers.location, sitemapUrl).href;
+            console.log(`↪️ Sitemap redirect: ${sitemapUrl} -> ${redirectUrl}`);
+            fetchSingleSitemap(redirectUrl, depth).then(resolve);
+            return;
+          }
+
+          if (res.statusCode !== 200) {
+            resolve(); // Silently skip non-existent sitemaps
+            return;
+          }
+
+          let data = [];
+
+          // Handle gzip encoding (either from URL or content-encoding)
+          const contentEncoding = res.headers["content-encoding"];
+          const shouldDecompress = isGzipped || contentEncoding === "gzip";
+          const stream = shouldDecompress ? res.pipe(zlib.createGunzip()) : res;
+
+          stream.on("data", (chunk) => data.push(chunk));
+          stream.on("error", (err) => {
+            // Try without decompression if gzip fails
+            if (shouldDecompress && err.code === "Z_DATA_ERROR") {
+              console.warn(
+                `⚠️ Gzip decompression failed for ${sitemapUrl}, trying raw content`
+              );
+              // Re-fetch without decompression
+              data = [];
+              res.on("data", (chunk) => data.push(chunk));
+            } else {
+              errors.push({
+                url: sitemapUrl,
+                error: `Stream error: ${err.message}`,
+              });
+              resolve();
+            }
+          });
+          stream.on("end", async () => {
+            try {
+              const content = Buffer.concat(data).toString("utf8");
+
+              // Skip empty content
+              if (!content || content.trim().length === 0) {
+                resolve();
+                return;
+              }
+
+              // Detect sitemap type and parse accordingly
+              if (isSitemapIndex(content)) {
+                // It's a sitemap index - extract child sitemaps
+                const childSitemaps = extractSitemapsFromIndex(content);
+                console.log(
+                  `📂 Sitemap index found with ${childSitemaps.length} child sitemaps: ${sitemapUrl}`
+                );
+
+                // Recursively fetch child sitemaps (limit to first 20)
+                for (const childUrl of childSitemaps.slice(0, 20)) {
+                  try {
+                    // Resolve relative URLs
+                    const absoluteUrl = childUrl.startsWith("http")
+                      ? childUrl
+                      : new URL(childUrl, sitemapUrl).href;
+                    await fetchSingleSitemap(absoluteUrl, depth + 1);
+                  } catch (e) {
+                    errors.push({
+                      url: childUrl,
+                      error: `Invalid URL: ${e.message}`,
+                    });
+                  }
+                }
+              } else if (isUrlSetSitemap(content)) {
+                // Regular XML sitemap - extract URLs
+                const urls = extractUrlsFromXml(content);
+
+                urls.forEach((url) => {
+                  try {
+                    // Validate and normalize URL
+                    const urlObj = new URL(url);
+                    discoveredUrls.add(urlObj.href);
+                  } catch {
+                    // Try to resolve relative URLs
+                    try {
+                      const absoluteUrl = new URL(url, sitemapUrl).href;
+                      discoveredUrls.add(absoluteUrl);
+                    } catch {
+                      // Skip invalid URLs
+                    }
+                  }
+                });
+
+                if (urls.length > 0) {
+                  console.log(
+                    `📄 Sitemap parsed: ${urls.length} URLs from ${sitemapUrl}`
+                  );
+                }
+              } else if (
+                content.includes("<?xml") ||
+                content.includes("<rss") ||
+                content.includes("<feed")
+              ) {
+                // Try parsing as RSS/Atom feed
+                const urls = extractUrlsFromXml(content);
+                urls.forEach((url) => {
+                  try {
+                    new URL(url);
+                    discoveredUrls.add(url);
+                  } catch {}
+                });
+                if (urls.length > 0) {
+                  console.log(
+                    `📄 Feed parsed: ${urls.length} URLs from ${sitemapUrl}`
+                  );
+                }
+              } else if (!content.includes("<")) {
+                // Might be a plain text sitemap
+                const urls = parseTextSitemap(content);
+                urls.forEach((url) => discoveredUrls.add(url));
+                if (urls.length > 0) {
+                  console.log(
+                    `📄 Text sitemap parsed: ${urls.length} URLs from ${sitemapUrl}`
+                  );
+                }
+              }
+
+              resolve();
+            } catch (parseError) {
+              errors.push({
+                url: sitemapUrl,
+                error: `Parse error: ${parseError.message}`,
+              });
+              resolve();
+            }
+          });
+        });
+
+        req.on("error", (err) => {
+          // Don't log errors for default sitemap locations that don't exist
+          const isDefaultLocation =
+            sitemapUrl.includes("sitemap_index") ||
+            sitemapUrl.includes("sitemap-index") ||
+            sitemapUrl.includes("sitemap1") ||
+            sitemapUrl.includes("post-sitemap") ||
+            sitemapUrl.includes("page-sitemap") ||
+            sitemapUrl.includes("sitemaps.xml");
+          if (!isDefaultLocation) {
+            errors.push({ url: sitemapUrl, error: err.message });
+          }
+          resolve();
+        });
+
+        req.setTimeout(15000, () => {
+          req.destroy();
+          errors.push({ url: sitemapUrl, error: "Timeout (15s)" });
+          resolve();
+        });
+
+        req.end();
+      } catch (err) {
+        errors.push({ url: sitemapUrl, error: err.message });
+        resolve();
+      }
+    });
+  }
+
+  // Fetch all sitemaps
+  console.log(
+    `🔍 Checking ${sitemapUrls.length} potential sitemap location(s)...`
+  );
+  for (const sitemapUrl of sitemapUrls) {
+    await fetchSingleSitemap(sitemapUrl, 0);
+    // Stop early if we found enough URLs
+    if (discoveredUrls.size > 5000) {
+      console.log(
+        `⚠️ Sitemap URL limit reached (5000+), stopping sitemap discovery`
+      );
+      break;
+    }
+  }
+
+  const urlArray = Array.from(discoveredUrls);
+
+  if (urlArray.length > 0) {
+    console.log(
+      `✅ Sitemap discovery complete: ${urlArray.length} total URLs found`
+    );
+  } else {
+    console.log(`ℹ️ No sitemap found or no URLs discovered`);
+  }
+
+  return {
+    urls: urlArray,
+    errors: errors.filter((e) => !e.error.includes("ENOTFOUND")), // Filter out DNS errors for non-existent defaults
+    found: urlArray.length > 0,
+  };
 }
 
 /**
@@ -95,74 +600,85 @@ async function loadRobots(url) {
  */
 async function interactWithDropdowns(page) {
   try {
-    const dropdownLinks = await safeEvaluate(page, () => {
-      const links = [];
-      
-      // Find dropdown triggers (common patterns)
-      const dropdownSelectors = [
-        'button[aria-expanded]',
-        'button[aria-haspopup="true"]',
-        '.dropdown-toggle',
-        '.dropdown-trigger',
-        '[class*="dropdown"]',
-        '[class*="menu-trigger"]',
-        'nav a[href="#"]', // Links that might trigger dropdowns
-      ];
-      
-      const triggers = [];
-      dropdownSelectors.forEach(selector => {
-        try {
-          const elements = document.querySelectorAll(selector);
-          elements.forEach(el => triggers.push(el));
-        } catch {}
-      });
-      
-      // Try to click dropdowns and extract links
-      triggers.forEach(trigger => {
-        try {
-          // Check if it's a dropdown parent
-          const parent = trigger.closest('li') || trigger.parentElement;
-          if (parent) {
-            const dropdownMenu = parent.querySelector('.dropdown-menu, .dropdown, [role="menu"], ul');
-            if (dropdownMenu) {
-              const menuLinks = dropdownMenu.querySelectorAll('a[href]');
-              menuLinks.forEach(link => {
-                const href = link.getAttribute('href');
-                if (href && href !== '#' && !href.startsWith('javascript:')) {
-                  try {
-                    const resolvedUrl = new URL(href, window.location.href);
-                    links.push(resolvedUrl.href);
-                  } catch {
-                    if (href.startsWith('/') || href.startsWith('http')) {
-                      try {
-                        links.push(new URL(href, window.location.origin).href);
-                      } catch {}
+    const dropdownLinks = await safeEvaluate(
+      page,
+      () => {
+        const links = [];
+
+        // Find dropdown triggers (common patterns)
+        const dropdownSelectors = [
+          "button[aria-expanded]",
+          'button[aria-haspopup="true"]',
+          ".dropdown-toggle",
+          ".dropdown-trigger",
+          '[class*="dropdown"]',
+          '[class*="menu-trigger"]',
+          'nav a[href="#"]', // Links that might trigger dropdowns
+        ];
+
+        const triggers = [];
+        dropdownSelectors.forEach((selector) => {
+          try {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach((el) => triggers.push(el));
+          } catch {}
+        });
+
+        // Try to click dropdowns and extract links
+        triggers.forEach((trigger) => {
+          try {
+            // Check if it's a dropdown parent
+            const parent = trigger.closest("li") || trigger.parentElement;
+            if (parent) {
+              const dropdownMenu = parent.querySelector(
+                '.dropdown-menu, .dropdown, [role="menu"], ul'
+              );
+              if (dropdownMenu) {
+                const menuLinks = dropdownMenu.querySelectorAll("a[href]");
+                menuLinks.forEach((link) => {
+                  const href = link.getAttribute("href");
+                  if (href && href !== "#" && !href.startsWith("javascript:")) {
+                    try {
+                      const resolvedUrl = new URL(href, window.location.href);
+                      links.push(resolvedUrl.href);
+                    } catch {
+                      if (href.startsWith("/") || href.startsWith("http")) {
+                        try {
+                          links.push(
+                            new URL(href, window.location.origin).href
+                          );
+                        } catch {}
+                      }
                     }
                   }
-                }
-              });
+                });
+              }
             }
-          }
-        } catch {}
-      });
-      
-      return [...new Set(links)]; // Remove duplicates
-    }, []);
-    
+          } catch {}
+        });
+
+        return [...new Set(links)]; // Remove duplicates
+      },
+      []
+    );
+
     // Also try clicking dropdowns to reveal content
     try {
-      const dropdownButtons = await page.$$('button[aria-expanded="false"], .dropdown-toggle:not(.active)');
-      for (const button of dropdownButtons.slice(0, 5)) { // Limit to 5 dropdowns
+      const dropdownButtons = await page.$$(
+        'button[aria-expanded="false"], .dropdown-toggle:not(.active)'
+      );
+      for (const button of dropdownButtons.slice(0, 5)) {
+        // Limit to 5 dropdowns
         try {
           await button.click({ timeout: 2000 });
           await page.waitForTimeout(500); // Wait for dropdown to open
         } catch {}
       }
     } catch {}
-    
+
     return dropdownLinks;
   } catch (error) {
-    console.warn('Error interacting with dropdowns:', error.message);
+    console.warn("Error interacting with dropdowns:", error.message);
     return [];
   }
 }
@@ -173,78 +689,87 @@ async function interactWithDropdowns(page) {
  */
 async function handlePagination(page, baseUrl) {
   const paginatedLinks = [];
-  
+
   try {
     // Extract pagination links without navigating
-    const paginationLinks = await safeEvaluate(page, () => {
-      const links = [];
-      
-      // Find pagination container
-      const paginationContainer = document.querySelector('.pagination, [class*="pagination"], nav[aria-label*="pagination" i], [role="navigation"]');
-      
-      if (paginationContainer) {
-        // Extract all pagination links (numbered pages, next, previous)
-        const paginationElements = paginationContainer.querySelectorAll('a[href], button[data-page]');
-        
-        paginationElements.forEach(el => {
-          try {
-            let href = el.getAttribute('href');
-            if (!href && el.hasAttribute('data-page')) {
-              // Some pagination uses data attributes
-              const pageNum = el.getAttribute('data-page');
-              const currentUrl = new URL(window.location.href);
-              // Try common pagination URL patterns
-              if (currentUrl.searchParams.has('page')) {
-                currentUrl.searchParams.set('page', pageNum);
-                href = currentUrl.href;
-              } else {
-                href = `${currentUrl.pathname}?page=${pageNum}`;
-              }
-            }
-            
-            if (href && href !== '#' && !href.startsWith('javascript:')) {
-              try {
-                const resolvedUrl = new URL(href, window.location.href);
-                // Only include pagination links (next, previous, numbered pages)
-                const text = el.textContent?.toLowerCase() || '';
-                const ariaLabel = el.getAttribute('aria-label')?.toLowerCase() || '';
-                const isPaginationLink = 
-                  text.includes('next') || 
-                  text.includes('previous') || 
-                  text.includes('prev') ||
-                  ariaLabel.includes('next') ||
-                  ariaLabel.includes('previous') ||
-                  ariaLabel.includes('page') ||
-                  !isNaN(parseInt(text.trim()));
-                
-                if (isPaginationLink) {
-                  links.push(resolvedUrl.href);
+    const paginationLinks = await safeEvaluate(
+      page,
+      () => {
+        const links = [];
+
+        // Find pagination container
+        const paginationContainer = document.querySelector(
+          '.pagination, [class*="pagination"], nav[aria-label*="pagination" i], [role="navigation"]'
+        );
+
+        if (paginationContainer) {
+          // Extract all pagination links (numbered pages, next, previous)
+          const paginationElements = paginationContainer.querySelectorAll(
+            "a[href], button[data-page]"
+          );
+
+          paginationElements.forEach((el) => {
+            try {
+              let href = el.getAttribute("href");
+              if (!href && el.hasAttribute("data-page")) {
+                // Some pagination uses data attributes
+                const pageNum = el.getAttribute("data-page");
+                const currentUrl = new URL(window.location.href);
+                // Try common pagination URL patterns
+                if (currentUrl.searchParams.has("page")) {
+                  currentUrl.searchParams.set("page", pageNum);
+                  href = currentUrl.href;
+                } else {
+                  href = `${currentUrl.pathname}?page=${pageNum}`;
                 }
-              } catch {}
-            }
-          } catch {}
-        });
-      }
-      
-      // Also check for rel="next" links
-      const nextLink = document.querySelector('link[rel="next"]');
-      if (nextLink) {
-        const href = nextLink.getAttribute('href');
-        if (href) {
-          try {
-            links.push(new URL(href, window.location.href).href);
-          } catch {}
+              }
+
+              if (href && href !== "#" && !href.startsWith("javascript:")) {
+                try {
+                  const resolvedUrl = new URL(href, window.location.href);
+                  // Only include pagination links (next, previous, numbered pages)
+                  const text = el.textContent?.toLowerCase() || "";
+                  const ariaLabel =
+                    el.getAttribute("aria-label")?.toLowerCase() || "";
+                  const isPaginationLink =
+                    text.includes("next") ||
+                    text.includes("previous") ||
+                    text.includes("prev") ||
+                    ariaLabel.includes("next") ||
+                    ariaLabel.includes("previous") ||
+                    ariaLabel.includes("page") ||
+                    !isNaN(parseInt(text.trim()));
+
+                  if (isPaginationLink) {
+                    links.push(resolvedUrl.href);
+                  }
+                } catch {}
+              }
+            } catch {}
+          });
         }
-      }
-      
-      return [...new Set(links)]; // Remove duplicates
-    }, []).catch(() => []);
-    
+
+        // Also check for rel="next" links
+        const nextLink = document.querySelector('link[rel="next"]');
+        if (nextLink) {
+          const href = nextLink.getAttribute("href");
+          if (href) {
+            try {
+              links.push(new URL(href, window.location.href).href);
+            } catch {}
+          }
+        }
+
+        return [...new Set(links)]; // Remove duplicates
+      },
+      []
+    ).catch(() => []);
+
     paginatedLinks.push(...paginationLinks);
-    
+
     return [...new Set(paginatedLinks)]; // Remove duplicates
   } catch (error) {
-    console.warn('Error handling pagination:', error.message);
+    console.warn("Error handling pagination:", error.message);
     return [];
   }
 }
@@ -254,41 +779,47 @@ async function handlePagination(page, baseUrl) {
  */
 async function capturePageFragments(page, baseUrl) {
   const fragmentLinks = [];
-  
+
   try {
     // Find all hash links that might be page sections
-    const fragments = await safeEvaluate(page, () => {
-      const fragmentLinks = [];
-      const allLinks = document.querySelectorAll('a[href^="#"]');
-      
-      allLinks.forEach(link => {
-        const href = link.getAttribute('href');
-        if (href && href !== '#' && !href.startsWith('#/')) {
-          // This is a fragment (like #section-name), not a route
-          const fragmentId = href.substring(1);
-          const targetElement = document.getElementById(fragmentId) || 
-                               document.querySelector(`[name="${fragmentId}"]`) ||
-                               document.querySelector(`[id*="${fragmentId}"]`);
-          
-          if (targetElement) {
-            // Check if this section has meaningful content
-            const text = targetElement.textContent?.trim() || '';
-            if (text.length > 50) { // Has meaningful content
-              fragmentLinks.push({
-                fragment: href,
-                hasContent: true,
-                title: link.textContent?.trim() || fragmentId,
-              });
+    const fragments = await safeEvaluate(
+      page,
+      () => {
+        const fragmentLinks = [];
+        const allLinks = document.querySelectorAll('a[href^="#"]');
+
+        allLinks.forEach((link) => {
+          const href = link.getAttribute("href");
+          if (href && href !== "#" && !href.startsWith("#/")) {
+            // This is a fragment (like #section-name), not a route
+            const fragmentId = href.substring(1);
+            const targetElement =
+              document.getElementById(fragmentId) ||
+              document.querySelector(`[name="${fragmentId}"]`) ||
+              document.querySelector(`[id*="${fragmentId}"]`);
+
+            if (targetElement) {
+              // Check if this section has meaningful content
+              const text = targetElement.textContent?.trim() || "";
+              if (text.length > 50) {
+                // Has meaningful content
+                fragmentLinks.push({
+                  fragment: href,
+                  hasContent: true,
+                  title: link.textContent?.trim() || fragmentId,
+                });
+              }
             }
           }
-        }
-      });
-      
-      return fragmentLinks;
-    }, []);
-    
+        });
+
+        return fragmentLinks;
+      },
+      []
+    );
+
     // Create full URLs for fragments
-    fragments.forEach(fragment => {
+    fragments.forEach((fragment) => {
       try {
         const urlObj = new URL(baseUrl);
         urlObj.hash = fragment.fragment;
@@ -299,10 +830,10 @@ async function capturePageFragments(page, baseUrl) {
         });
       } catch {}
     });
-    
+
     return fragmentLinks;
   } catch (error) {
-    console.warn('Error capturing page fragments:', error.message);
+    console.warn("Error capturing page fragments:", error.message);
     return [];
   }
 }
@@ -313,16 +844,15 @@ async function capturePageFragments(page, baseUrl) {
 async function waitForSPAContent(page) {
   const MAX_WAIT_TIME = 10000; // Maximum 10 seconds total wait
   const startTime = Date.now();
-  
+
   try {
     // Wait for DOM to be ready (with timeout and CSP-safe)
     try {
       await Promise.race([
-        page.waitForFunction(
-          () => document.readyState === 'complete',
-          { timeout: 3000 }
-        ),
-        new Promise(resolve => setTimeout(resolve, 3000))
+        page.waitForFunction(() => document.readyState === "complete", {
+          timeout: 3000,
+        }),
+        new Promise((resolve) => setTimeout(resolve, 3000)),
       ]);
     } catch {
       // Continue if eval is disabled or timeout
@@ -330,39 +860,48 @@ async function waitForSPAContent(page) {
 
     // Check if page uses a common SPA framework
     const isSPA = await Promise.race([
-      safeEvaluate(page, () => {
-        return !!(
-          window.React ||
-          window.Vue ||
-          window.angular ||
-          window.__NEXT_DATA__ ||
-          document.querySelector('[data-reactroot]') ||
-          document.querySelector('[ng-app]') ||
-          document.querySelector('[data-vue]')
-        );
-      }, false),
-      new Promise(resolve => setTimeout(() => resolve(false), 2000))
+      safeEvaluate(
+        page,
+        () => {
+          return !!(
+            window.React ||
+            window.Vue ||
+            window.angular ||
+            window.__NEXT_DATA__ ||
+            document.querySelector("[data-reactroot]") ||
+            document.querySelector("[ng-app]") ||
+            document.querySelector("[data-vue]")
+          );
+        },
+        false
+      ),
+      new Promise((resolve) => setTimeout(() => resolve(false), 2000)),
     ]).catch(() => false);
 
     if (isSPA) {
       // Wait for network to be idle (with strict timeout)
       try {
         await Promise.race([
-          page.waitForLoadState('networkidle', { timeout: SPA_WAIT_TIMEOUT }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Network idle timeout')), SPA_WAIT_TIMEOUT))
+          page.waitForLoadState("networkidle", { timeout: SPA_WAIT_TIMEOUT }),
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error("Network idle timeout")),
+              SPA_WAIT_TIMEOUT
+            )
+          ),
         ]);
       } catch {
         // Fallback: wait for any dynamic content (with timeout)
         await Promise.race([
           page.waitForTimeout(2000),
-          new Promise(resolve => setTimeout(resolve, 2000))
+          new Promise((resolve) => setTimeout(resolve, 2000)),
         ]);
       }
     } else {
       // For non-SPA pages, shorter wait
       await Promise.race([
         page.waitForTimeout(500),
-        new Promise(resolve => setTimeout(resolve, 500))
+        new Promise((resolve) => setTimeout(resolve, 500)),
       ]);
     }
 
@@ -375,34 +914,38 @@ async function waitForSPAContent(page) {
     // Skip if eval is disabled (CSP)
     try {
       await Promise.race([
-        safeEvaluate(page, () => {
-          return new Promise((resolve) => {
-            let timeout;
-            let resolved = false;
-            const observer = new MutationObserver(() => {
-              if (!resolved) {
-                clearTimeout(timeout);
-                timeout = setTimeout(() => {
+        safeEvaluate(
+          page,
+          () => {
+            return new Promise((resolve) => {
+              let timeout;
+              let resolved = false;
+              const observer = new MutationObserver(() => {
+                if (!resolved) {
+                  clearTimeout(timeout);
+                  timeout = setTimeout(() => {
+                    resolved = true;
+                    observer.disconnect();
+                    resolve();
+                  }, 500);
+                }
+              });
+              observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+              });
+              timeout = setTimeout(() => {
+                if (!resolved) {
                   resolved = true;
                   observer.disconnect();
                   resolve();
-                }, 500);
-              }
+                }
+              }, 1000);
             });
-            observer.observe(document.body, {
-              childList: true,
-              subtree: true,
-            });
-            timeout = setTimeout(() => {
-              if (!resolved) {
-                resolved = true;
-                observer.disconnect();
-                resolve();
-              }
-            }, 1000);
-          });
-        }, Promise.resolve()),
-        new Promise(resolve => setTimeout(resolve, 2000))
+          },
+          Promise.resolve()
+        ),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
       ]);
     } catch {
       // Ignore errors
@@ -411,7 +954,7 @@ async function waitForSPAContent(page) {
     // If all else fails, wait a bit (with timeout)
     await Promise.race([
       page.waitForTimeout(1000),
-      new Promise(resolve => setTimeout(resolve, 1000))
+      new Promise((resolve) => setTimeout(resolve, 1000)),
     ]);
   }
 }
@@ -423,7 +966,7 @@ async function safeEvaluate(page, fn, fallback = null) {
   try {
     return await page.evaluate(fn);
   } catch (error) {
-    if (error.message && error.message.includes('eval is disabled')) {
+    if (error.message && error.message.includes("eval is disabled")) {
       // CSP has disabled eval, return fallback or empty result
       console.warn(`⚠️ eval disabled on page, using fallback`);
       return fallback;
@@ -439,28 +982,28 @@ async function safeEvaluate(page, fn, fallback = null) {
 async function extractPageDataWithoutEval(page, url) {
   try {
     const links = [];
-    
+
     // Extract title using locator (doesn't need eval)
-    let title = 'Untitled';
+    let title = "Untitled";
     try {
-      const titleElement = page.locator('title').first();
-      if (await titleElement.count() > 0) {
-        title = await titleElement.textContent() || 'Untitled';
+      const titleElement = page.locator("title").first();
+      if ((await titleElement.count()) > 0) {
+        title = (await titleElement.textContent()) || "Untitled";
       } else {
-        const h1Element = page.locator('h1').first();
-        if (await h1Element.count() > 0) {
-          title = await h1Element.textContent() || 'Untitled';
+        const h1Element = page.locator("h1").first();
+        if ((await h1Element.count()) > 0) {
+          title = (await h1Element.textContent()) || "Untitled";
         }
       }
     } catch {}
-    
+
     // Extract links using locator API (doesn't need eval)
     try {
-      const linkElements = await page.locator('a[href]').all();
+      const linkElements = await page.locator("a[href]").all();
       for (const linkEl of linkElements) {
         try {
-          const href = await linkEl.getAttribute('href');
-          if (href && href !== '#' && !href.startsWith('javascript:')) {
+          const href = await linkEl.getAttribute("href");
+          if (href && href !== "#" && !href.startsWith("javascript:")) {
             try {
               const resolvedUrl = new URL(href, url);
               links.push(resolvedUrl.href);
@@ -471,15 +1014,15 @@ async function extractPageDataWithoutEval(page, url) {
         } catch {}
       }
     } catch {}
-    
+
     // Extract hash fragments
     const fragmentLinks = [];
     try {
       const fragmentElements = await page.locator('a[href^="#"]').all();
       for (const fragEl of fragmentElements) {
         try {
-          const href = await fragEl.getAttribute('href');
-          if (href && href !== '#' && !href.startsWith('#/')) {
+          const href = await fragEl.getAttribute("href");
+          if (href && href !== "#" && !href.startsWith("#/")) {
             try {
               const urlObj = new URL(url);
               urlObj.hash = href;
@@ -489,26 +1032,26 @@ async function extractPageDataWithoutEval(page, url) {
         } catch {}
       }
     } catch {}
-    
+
     const allLinks = [...new Set([...links, ...fragmentLinks])];
-    
+
     return {
-      title: title.trim() || 'Untitled',
+      title: title.trim() || "Untitled",
       links: allLinks,
       pageData: {
         meta: {
-          description: '',
-          canonical: '',
+          description: "",
+          canonical: "",
         },
         links: allLinks,
-      }
+      },
     };
   } catch (error) {
     console.warn(`Error extracting data without eval:`, error.message);
     return {
-      title: 'Untitled',
+      title: "Untitled",
       links: [],
-      pageData: { links: [] }
+      pageData: { links: [] },
     };
   }
 }
@@ -518,19 +1061,26 @@ async function extractPageDataWithoutEval(page, url) {
  */
 async function crawlPage(context, url, retryCount = 0) {
   const PAGE_CRAWL_TIMEOUT = 60000; // 60 seconds max per page
-  
+
   // Wrap entire crawl in timeout
   return Promise.race([
     crawlPageInternal(context, url, retryCount),
     new Promise((_, reject) => {
       setTimeout(() => {
-        reject(new Error(`Page crawl timeout after ${PAGE_CRAWL_TIMEOUT}ms: ${url}`));
+        reject(
+          new Error(`Page crawl timeout after ${PAGE_CRAWL_TIMEOUT}ms: ${url}`)
+        );
       }, PAGE_CRAWL_TIMEOUT);
-    })
-  ]).catch(error => {
-    if (error.message.includes('timeout')) {
+    }),
+  ]).catch((error) => {
+    if (error.message.includes("timeout")) {
       console.warn(`⚠️ Page crawl timeout: ${url}`);
-      return { title: "Timeout", links: [], statusCode: 0, error: error.message };
+      return {
+        title: "Timeout",
+        links: [],
+        statusCode: 0,
+        error: error.message,
+      };
     }
     throw error;
   });
@@ -543,28 +1093,32 @@ async function crawlPageInternal(context, url, retryCount = 0) {
   const page = await context.newPage();
 
   // Block unnecessary resources for faster crawling
-  await page.route('**/*', route => {
+  await page.route("**/*", (route) => {
     const resourceType = route.request().resourceType();
     const url = route.request().url();
-    
+
     // Block more resource types for better performance
-    if ([
-      'image', 
-      'font', 
-      'media', 
-      'stylesheet',
-      'websocket',
-      'manifest',
-      'other'
-    ].includes(resourceType)) {
+    if (
+      [
+        "image",
+        "font",
+        "media",
+        "stylesheet",
+        "websocket",
+        "manifest",
+        "other",
+      ].includes(resourceType)
+    ) {
       route.abort();
-    } else if (resourceType === 'script') {
+    } else if (resourceType === "script") {
       // Allow scripts but block analytics/tracking
-      if (url.includes('google-analytics') || 
-          url.includes('googletagmanager') ||
-          url.includes('facebook.net') ||
-          url.includes('doubleclick') ||
-          url.includes('analytics')) {
+      if (
+        url.includes("google-analytics") ||
+        url.includes("googletagmanager") ||
+        url.includes("facebook.net") ||
+        url.includes("doubleclick") ||
+        url.includes("analytics")
+      ) {
         route.abort();
       } else {
         route.continue();
@@ -580,16 +1134,16 @@ async function crawlPageInternal(context, url, retryCount = 0) {
     let response = null;
     let statusCode = 200;
     const strategies = [
-      { waitUntil: 'domcontentloaded', timeout: PAGE_NAVIGATION_TIMEOUT },
-      { waitUntil: 'load', timeout: PAGE_NAVIGATION_TIMEOUT },
-      { waitUntil: 'networkidle', timeout: PAGE_NAVIGATION_TIMEOUT }
+      { waitUntil: "domcontentloaded", timeout: PAGE_NAVIGATION_TIMEOUT },
+      { waitUntil: "load", timeout: PAGE_NAVIGATION_TIMEOUT },
+      { waitUntil: "networkidle", timeout: PAGE_NAVIGATION_TIMEOUT },
     ];
 
     for (const strategy of strategies) {
       try {
         response = await page.goto(url, strategy);
         navigationSuccess = true;
-        
+
         // Get status code
         if (response) {
           statusCode = response.status();
@@ -608,17 +1162,17 @@ async function crawlPageInternal(context, url, retryCount = 0) {
     }
 
     if (!navigationSuccess) {
-      throw new Error('Navigation failed with all strategies');
+      throw new Error("Navigation failed with all strategies");
     }
 
     // Check if this is a hash route (SPA route)
-    const isHashRoute = url.includes('#/');
-    
+    const isHashRoute = url.includes("#/");
+
     // For hash routes, wait for the router to navigate first
     if (isHashRoute) {
       // Wait for hash route to load
       await page.waitForTimeout(2000);
-      
+
       // Wait for the route content to appear (with CSP-safe check)
       try {
         // Use a timeout wrapper since waitForFunction uses eval internally
@@ -628,13 +1182,13 @@ async function crawlPageInternal(context, url, retryCount = 0) {
               // Check if there's actual content (not just loading/blank)
               const body = document.body;
               if (!body) return false;
-              const text = body.textContent || '';
+              const text = body.textContent || "";
               // Should have some meaningful content (more than just whitespace)
               return text.trim().length > 50;
             },
             { timeout: 10000 }
           ),
-          new Promise(resolve => setTimeout(resolve, 10000))
+          new Promise((resolve) => setTimeout(resolve, 10000)),
         ]).catch(() => {
           // Continue even if timeout or eval disabled
         });
@@ -644,59 +1198,69 @@ async function crawlPageInternal(context, url, retryCount = 0) {
     }
 
     // Check for bot protection pages (Cloudflare, etc.) - but be less aggressive for hash routes
-    const isBlocked = await safeEvaluate(page, () => {
-      const title = document.title.toLowerCase();
-      const bodyText = document.body?.textContent?.toLowerCase() || '';
-      const pageContent = document.documentElement.innerHTML.toLowerCase();
-      
-      // Only check for actual Cloudflare elements, not just title text (which might be from base page)
-      const hasCloudflareElements = (
-        document.querySelector('#challenge-form') !== null ||
-        document.querySelector('.cf-browser-verification') !== null ||
-        document.querySelector('[data-ray]') !== null ||
-        pageContent.includes('cf-browser-verification') ||
-        pageContent.includes('ddos protection by cloudflare')
-      );
-      
-      // For title/body, only flag if it's the ONLY content (not just part of base page)
-      const isOnlyBlockedContent = (
-        (title.includes('just a moment') || title.includes('checking your browser')) &&
-        bodyText.length < 100 // Very little content suggests it's actually blocked
-      );
-      
-      return hasCloudflareElements || isOnlyBlockedContent;
-    }, false);
+    const isBlocked = await safeEvaluate(
+      page,
+      () => {
+        const title = document.title.toLowerCase();
+        const bodyText = document.body?.textContent?.toLowerCase() || "";
+        const pageContent = document.documentElement.innerHTML.toLowerCase();
+
+        // Only check for actual Cloudflare elements, not just title text (which might be from base page)
+        const hasCloudflareElements =
+          document.querySelector("#challenge-form") !== null ||
+          document.querySelector(".cf-browser-verification") !== null ||
+          document.querySelector("[data-ray]") !== null ||
+          pageContent.includes("cf-browser-verification") ||
+          pageContent.includes("ddos protection by cloudflare");
+
+        // For title/body, only flag if it's the ONLY content (not just part of base page)
+        const isOnlyBlockedContent =
+          (title.includes("just a moment") ||
+            title.includes("checking your browser")) &&
+          bodyText.length < 100; // Very little content suggests it's actually blocked
+
+        return hasCloudflareElements || isOnlyBlockedContent;
+      },
+      false
+    );
 
     // If blocked, wait for challenge to resolve (but shorter wait for hash routes)
     if (isBlocked) {
-      console.log(`⚠️ Bot protection detected for ${url}, waiting for challenge to resolve...`);
-      
+      console.log(
+        `⚠️ Bot protection detected for ${url}, waiting for challenge to resolve...`
+      );
+
       // Shorter wait for hash routes (they might just be loading)
       const maxWaitTime = isHashRoute ? 5000 : 15000;
       const checkInterval = 500;
       const startTime = Date.now();
       let challengeResolved = false;
-      
+
       while (Date.now() - startTime < maxWaitTime && !challengeResolved) {
         await page.waitForTimeout(checkInterval);
-        
-        challengeResolved = await safeEvaluate(page, () => {
-          // Check if Cloudflare elements are gone
-          const hasElements = (
-            document.querySelector('#challenge-form') !== null ||
-            document.querySelector('.cf-browser-verification') !== null
-          );
-          
-          if (hasElements) return false;
-          
-          // Check if there's actual content now
-          const bodyText = document.body?.textContent || '';
-          return bodyText.trim().length > 100;
-        }, false);
+
+        challengeResolved = await safeEvaluate(
+          page,
+          () => {
+            // Check if Cloudflare elements are gone
+            const hasElements =
+              document.querySelector("#challenge-form") !== null ||
+              document.querySelector(".cf-browser-verification") !== null;
+
+            if (hasElements) return false;
+
+            // Check if there's actual content now
+            const bodyText = document.body?.textContent || "";
+            return bodyText.trim().length > 100;
+          },
+          false
+        );
       }
-      
+
       if (!challengeResolved && !isHashRoute) {
-        console.warn(`⚠️ Challenge not resolved for ${url} after ${maxWaitTime}ms`);
+        console.warn(
+          `⚠️ Challenge not resolved for ${url} after ${maxWaitTime}ms`
+        );
       } else if (challengeResolved) {
         console.log(`✅ Challenge resolved for ${url}`);
         await page.waitForTimeout(1000);
@@ -705,107 +1269,129 @@ async function crawlPageInternal(context, url, retryCount = 0) {
 
     // Wait for SPA content intelligently
     await waitForSPAContent(page);
-    
+
     // For hash routes, wait a bit more for route-specific content
     if (isHashRoute) {
       await page.waitForTimeout(2000);
     }
-    
+
     // Interact with dropdown menus to reveal hidden links (with timeout)
     const dropdownLinks = await Promise.race([
       interactWithDropdowns(page),
-      new Promise(resolve => setTimeout(() => resolve([]), 5000))
+      new Promise((resolve) => setTimeout(() => resolve([]), 5000)),
     ]).catch(() => []);
-    
+
     // Capture page fragments/sections (with timeout)
     const fragmentLinks = await Promise.race([
       capturePageFragments(page, url),
-      new Promise(resolve => setTimeout(() => resolve([]), 3000))
+      new Promise((resolve) => setTimeout(() => resolve([]), 3000)),
     ]).catch(() => []);
-    
+
     // Handle pagination if present (with timeout)
     const paginatedLinks = await Promise.race([
       handlePagination(page, url),
-      new Promise(resolve => setTimeout(() => resolve([]), 5000))
+      new Promise((resolve) => setTimeout(() => resolve([]), 5000)),
     ]).catch(() => []);
 
     // Extract title with fallback
     let title = "Untitled";
-    const blockedTitles = ['just a moment', 'checking your browser', 'please wait'];
-    
+    const blockedTitles = [
+      "just a moment",
+      "checking your browser",
+      "please wait",
+    ];
+
     try {
       // For hash routes, try to get route-specific content first
-      const pageInfo = await safeEvaluate(page, (isHashRoute) => {
-        // Try multiple selectors for title
-        const titleEl = document.querySelector("title");
-        const h1El = document.querySelector("h1");
-        const h2El = document.querySelector("h2");
-        const metaTitle = document.querySelector('meta[property="og:title"]');
-        
-        let titleText = "";
-        if (titleEl) titleText = titleEl.textContent?.trim() || "";
-        if (!titleText && metaTitle) titleText = metaTitle.getAttribute('content')?.trim() || "";
-        if (!titleText && h1El) titleText = h1El.textContent?.trim() || "";
-        if (!titleText && h2El) titleText = h2El.textContent?.trim() || "";
-        
-        // For hash routes, also check for route-specific content
-        if (isHashRoute && !titleText) {
-          // Look for main content area
-          const mainContent = document.querySelector('main') || 
-                            document.querySelector('[role="main"]') ||
-                            document.querySelector('.content') ||
-                            document.querySelector('#content') ||
-                            document.body;
-          
-          if (mainContent) {
-            const h1 = mainContent.querySelector('h1');
-            if (h1) titleText = h1.textContent?.trim() || "";
+      const pageInfo = await safeEvaluate(
+        page,
+        (isHashRoute) => {
+          // Try multiple selectors for title
+          const titleEl = document.querySelector("title");
+          const h1El = document.querySelector("h1");
+          const h2El = document.querySelector("h2");
+          const metaTitle = document.querySelector('meta[property="og:title"]');
+
+          let titleText = "";
+          if (titleEl) titleText = titleEl.textContent?.trim() || "";
+          if (!titleText && metaTitle)
+            titleText = metaTitle.getAttribute("content")?.trim() || "";
+          if (!titleText && h1El) titleText = h1El.textContent?.trim() || "";
+          if (!titleText && h2El) titleText = h2El.textContent?.trim() || "";
+
+          // For hash routes, also check for route-specific content
+          if (isHashRoute && !titleText) {
+            // Look for main content area
+            const mainContent =
+              document.querySelector("main") ||
+              document.querySelector('[role="main"]') ||
+              document.querySelector(".content") ||
+              document.querySelector("#content") ||
+              document.body;
+
+            if (mainContent) {
+              const h1 = mainContent.querySelector("h1");
+              if (h1) titleText = h1.textContent?.trim() || "";
+            }
           }
-        }
-        
-        return {
-          title: titleText || "Untitled",
-          hasContent: document.body && document.body.textContent.trim().length > 50
-        };
-      }, { title: "Untitled", hasContent: false }, isHashRoute);
-      
+
+          return {
+            title: titleText || "Untitled",
+            hasContent:
+              document.body && document.body.textContent.trim().length > 50,
+          };
+        },
+        { title: "Untitled", hasContent: false },
+        isHashRoute
+      );
+
       title = pageInfo.title;
-      
+
       // If title is still "Just a moment" or similar, use URL-based fallback immediately
-      if (blockedTitles.some(blocked => title.toLowerCase().includes(blocked))) {
+      if (
+        blockedTitles.some((blocked) => title.toLowerCase().includes(blocked))
+      ) {
         // For hash routes, extract from hash path
         if (isHashRoute) {
           try {
             const urlObj = new URL(url);
             const hash = urlObj.hash?.substring(2); // Remove #/
             if (hash) {
-              const hashParts = hash.split('/').filter(p => p);
+              const hashParts = hash.split("/").filter((p) => p);
               if (hashParts.length > 0) {
                 const lastPart = hashParts[hashParts.length - 1];
-                title = lastPart.replace(/-/g, ' ').replace(/_/g, ' ')
-                  .replace(/\b\w/g, l => l.toUpperCase()) || 'Page';
+                title =
+                  lastPart
+                    .replace(/-/g, " ")
+                    .replace(/_/g, " ")
+                    .replace(/\b\w/g, (l) => l.toUpperCase()) || "Page";
               } else {
-                title = 'Home';
+                title = "Home";
               }
             } else {
-              title = 'Home';
+              title = "Home";
             }
           } catch {
-            title = 'Page';
+            title = "Page";
           }
         } else {
           // For non-hash routes, try waiting a bit more
-          console.warn(`⚠️ Title still shows bot protection for ${url}, using URL-based title...`);
+          console.warn(
+            `⚠️ Title still shows bot protection for ${url}, using URL-based title...`
+          );
           try {
             const urlObj = new URL(url);
-            const pathParts = urlObj.pathname.split('/').filter(p => p);
+            const pathParts = urlObj.pathname.split("/").filter((p) => p);
             if (pathParts.length > 0) {
-              title = pathParts[pathParts.length - 1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Page';
+              title =
+                pathParts[pathParts.length - 1]
+                  .replace(/-/g, " ")
+                  .replace(/\b\w/g, (l) => l.toUpperCase()) || "Page";
             } else {
-              title = 'Home';
+              title = "Home";
             }
           } catch {
-            title = 'Page';
+            title = "Page";
           }
         }
       }
@@ -816,20 +1402,26 @@ async function crawlPageInternal(context, url, retryCount = 0) {
           const urlObj = new URL(url);
           const hash = urlObj.hash?.substring(2);
           if (hash) {
-            const hashParts = hash.split('/').filter(p => p);
-            title = hashParts.length > 0
-              ? hashParts[hashParts.length - 1].replace(/-/g, ' ').replace(/_/g, ' ')
-                  .replace(/\b\w/g, l => l.toUpperCase())
-              : 'Home';
+            const hashParts = hash.split("/").filter((p) => p);
+            title =
+              hashParts.length > 0
+                ? hashParts[hashParts.length - 1]
+                    .replace(/-/g, " ")
+                    .replace(/_/g, " ")
+                    .replace(/\b\w/g, (l) => l.toUpperCase())
+                : "Home";
           } else {
-            title = 'Home';
+            title = "Home";
           }
         } else {
           const urlObj = new URL(url);
-          const pathParts = urlObj.pathname.split('/').filter(p => p);
-          title = pathParts.length > 0 
-            ? pathParts[pathParts.length - 1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-            : 'Home';
+          const pathParts = urlObj.pathname.split("/").filter((p) => p);
+          title =
+            pathParts.length > 0
+              ? pathParts[pathParts.length - 1]
+                  .replace(/-/g, " ")
+                  .replace(/\b\w/g, (l) => l.toUpperCase())
+              : "Home";
         }
       } catch {
         title = "Untitled";
@@ -840,154 +1432,200 @@ async function crawlPageInternal(context, url, retryCount = 0) {
     let pageData;
     let links = [];
     // Note: title is already declared above
-    
+
     try {
-      pageData = await safeEvaluate(page, (isHashRoute) => {
-      // Extract meta tags
-      const metaDescription = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
-      const metaRobots = document.querySelector('meta[name="robots"]')?.getAttribute('content') || 'index,follow';
-      const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
-      const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
-      
-      // Extract content signals
-      const h1 = document.querySelector('h1')?.textContent?.trim() || '';
-      const h2Elements = document.querySelectorAll('h2');
-      const h2Count = h2Elements.length;
-      const bodyText = document.body?.textContent || '';
-      const wordCount = bodyText.trim().split(/\s+/).filter(w => w.length > 0).length;
-      
-      // Extract links
-      const allLinks = Array.from(document.querySelectorAll('a[href]')).map(a => {
-        const href = a.getAttribute('href');
-        if (!href) return null;
-        try {
-          const base = window.location.href;
-          const resolvedUrl = new URL(href, base);
-          return resolvedUrl.href;
-        } catch {
-          if (href.startsWith('#')) {
-            return window.location.origin + window.location.pathname + href;
+      pageData = await safeEvaluate(
+        page,
+        (isHashRoute) => {
+          // Extract meta tags
+          const metaDescription =
+            document
+              .querySelector('meta[name="description"]')
+              ?.getAttribute("content") || "";
+          const metaRobots =
+            document
+              .querySelector('meta[name="robots"]')
+              ?.getAttribute("content") || "index,follow";
+          const canonical =
+            document
+              .querySelector('link[rel="canonical"]')
+              ?.getAttribute("href") || "";
+          const ogTitle =
+            document
+              .querySelector('meta[property="og:title"]')
+              ?.getAttribute("content") || "";
+
+          // Extract content signals
+          const h1 = document.querySelector("h1")?.textContent?.trim() || "";
+          const h2Elements = document.querySelectorAll("h2");
+          const h2Count = h2Elements.length;
+          const bodyText = document.body?.textContent || "";
+          const wordCount = bodyText
+            .trim()
+            .split(/\s+/)
+            .filter((w) => w.length > 0).length;
+
+          // Extract links
+          const allLinks = Array.from(document.querySelectorAll("a[href]"))
+            .map((a) => {
+              const href = a.getAttribute("href");
+              if (!href) return null;
+              try {
+                const base = window.location.href;
+                const resolvedUrl = new URL(href, base);
+                return resolvedUrl.href;
+              } catch {
+                if (href.startsWith("#")) {
+                  return (
+                    window.location.origin + window.location.pathname + href
+                  );
+                }
+                try {
+                  return new URL(href, window.location.origin).href;
+                } catch {
+                  return null;
+                }
+              }
+            })
+            .filter(Boolean);
+
+          // Include hash fragments that are page sections (not routes)
+          const fragmentLinks = Array.from(
+            document.querySelectorAll('a[href^="#"]')
+          )
+            .map((a) => {
+              const href = a.getAttribute("href");
+              if (href && href !== "#" && !href.startsWith("#/")) {
+                try {
+                  return (
+                    window.location.origin + window.location.pathname + href
+                  );
+                } catch {
+                  return null;
+                }
+              }
+              return null;
+            })
+            .filter(Boolean);
+
+          // Combine all links
+          const combinedLinks = [...new Set([...allLinks, ...fragmentLinks])];
+
+          // Detect SPA framework
+          const isSPA = !!(
+            window.React ||
+            window.Vue ||
+            window.angular ||
+            window.__NEXT_DATA__
+          );
+          const routeType = isHashRoute ? "hash" : isSPA ? "history" : "static";
+
+          // Detect framework hints
+          let frameworkHint = "unknown";
+          if (window.__NEXT_DATA__) frameworkHint = "nextjs";
+          else if (window.React) frameworkHint = "react";
+          else if (window.Vue) frameworkHint = "vue";
+          else if (window.angular) frameworkHint = "angular";
+
+          // Classify page intent (simple heuristic)
+          let intent = "informational";
+          let pageType = "page";
+          const path = window.location.pathname.toLowerCase();
+          if (
+            path.includes("/blog") ||
+            path.includes("/article") ||
+            path.includes("/post")
+          ) {
+            intent = "informational";
+            pageType = "article";
+          } else if (path.includes("/product") || path.includes("/shop")) {
+            intent = "transactional";
+            pageType = "product";
+          } else if (
+            path.includes("/learn") ||
+            path.includes("/tutorial") ||
+            path.includes("/guide")
+          ) {
+            intent = "informational";
+            pageType = "article";
           }
-          try {
-            return new URL(href, window.location.origin).href;
-          } catch {
-            return null;
-          }
-        }
-      }).filter(Boolean);
-      
-      // Include hash fragments that are page sections (not routes)
-      const fragmentLinks = Array.from(document.querySelectorAll('a[href^="#"]')).map(a => {
-        const href = a.getAttribute('href');
-        if (href && href !== '#' && !href.startsWith('#/')) {
-          try {
-            return window.location.origin + window.location.pathname + href;
-          } catch {
-            return null;
-          }
-        }
-        return null;
-      }).filter(Boolean);
-      
-      // Combine all links
-      const combinedLinks = [...new Set([...allLinks, ...fragmentLinks])];
-      
-      // Detect SPA framework
-      const isSPA = !!(window.React || window.Vue || window.angular || window.__NEXT_DATA__);
-      const routeType = isHashRoute ? 'hash' : (isSPA ? 'history' : 'static');
-      
-      // Detect framework hints
-      let frameworkHint = 'unknown';
-      if (window.__NEXT_DATA__) frameworkHint = 'nextjs';
-      else if (window.React) frameworkHint = 'react';
-      else if (window.Vue) frameworkHint = 'vue';
-      else if (window.angular) frameworkHint = 'angular';
-      
-      // Classify page intent (simple heuristic)
-      let intent = 'informational';
-      let pageType = 'page';
-      const path = window.location.pathname.toLowerCase();
-      if (path.includes('/blog') || path.includes('/article') || path.includes('/post')) {
-        intent = 'informational';
-        pageType = 'article';
-      } else if (path.includes('/product') || path.includes('/shop')) {
-        intent = 'transactional';
-        pageType = 'product';
-      } else if (path.includes('/learn') || path.includes('/tutorial') || path.includes('/guide')) {
-        intent = 'informational';
-        pageType = 'article';
+
+          return {
+            meta: {
+              description: metaDescription,
+              robots: metaRobots,
+              canonical: canonical,
+              ogTitle: ogTitle,
+            },
+            content_signals: {
+              h1: h1,
+              h2_count: h2Count,
+              word_count: wordCount,
+            },
+            links: combinedLinks,
+            tech: {
+              is_spa: isSPA,
+              route_type: routeType,
+              framework_hint: frameworkHint,
+            },
+            classification: {
+              intent: intent,
+              page_type: pageType,
+            },
+          };
+        },
+        isHashRoute,
+        null
+      );
+
+      // If eval is disabled, use fallback extraction method
+      if (!pageData) {
+        console.warn(`⚠️ Using fallback extraction for ${url} (eval disabled)`);
+        const fallbackData = await extractPageDataWithoutEval(page, url);
+        pageData = fallbackData.pageData || { links: [] };
+        title = fallbackData.title || title;
+        links = fallbackData.links || [];
+      } else {
+        // Extract all links for backward compatibility
+        // Combine regular links, dropdown links, paginated links, and fragment links
+        const allExtractedLinks = [
+          ...(pageData.links || []),
+          ...dropdownLinks,
+          ...paginatedLinks,
+          ...fragmentLinks.map((f) => f.url).filter(Boolean),
+        ];
+        // Sort links deterministically to ensure consistent discovery order
+        links = [...new Set(allExtractedLinks)].sort((a, b) =>
+          a.localeCompare(b)
+        ); // Remove duplicates and sort
       }
-      
+
+      // Build normalized URL path
+      let normalizedUrl = url;
+      try {
+        const urlObj = new URL(url);
+        normalizedUrl = urlObj.pathname + (isHashRoute ? urlObj.hash : "");
+        if (!normalizedUrl || normalizedUrl === "/") {
+          normalizedUrl = "/";
+        }
+      } catch {
+        normalizedUrl = url;
+      }
+
       return {
-        meta: {
-          description: metaDescription,
-          robots: metaRobots,
-          canonical: canonical,
-          ogTitle: ogTitle
+        title,
+        links,
+        statusCode,
+        pageData: {
+          ...pageData,
+          normalized_url: normalizedUrl,
         },
-        content_signals: {
-          h1: h1,
-          h2_count: h2Count,
-          word_count: wordCount
-        },
-        links: combinedLinks,
-        tech: {
-          is_spa: isSPA,
-          route_type: routeType,
-          framework_hint: frameworkHint
-        },
-        classification: {
-          intent: intent,
-          page_type: pageType
-        }
       };
-    }, isHashRoute, null);
-    
-    // If eval is disabled, use fallback extraction method
-    if (!pageData) {
-      console.warn(`⚠️ Using fallback extraction for ${url} (eval disabled)`);
-      const fallbackData = await extractPageDataWithoutEval(page, url);
-      pageData = fallbackData.pageData || { links: [] };
-      title = fallbackData.title || title;
-      links = fallbackData.links || [];
-    } else {
-      // Extract all links for backward compatibility
-      // Combine regular links, dropdown links, paginated links, and fragment links
-      const allExtractedLinks = [
-        ...(pageData.links || []),
-        ...dropdownLinks,
-        ...paginatedLinks,
-        ...fragmentLinks.map(f => f.url).filter(Boolean)
-      ];
-      // Sort links deterministically to ensure consistent discovery order
-      links = [...new Set(allExtractedLinks)].sort((a, b) => a.localeCompare(b)); // Remove duplicates and sort
-    }
-
-    // Build normalized URL path
-    let normalizedUrl = url;
-    try {
-      const urlObj = new URL(url);
-      normalizedUrl = urlObj.pathname + (isHashRoute ? urlObj.hash : '');
-      if (!normalizedUrl || normalizedUrl === '/') {
-        normalizedUrl = '/';
-      }
-    } catch {
-      normalizedUrl = url;
-    }
-
-    return { 
-      title, 
-      links, 
-      statusCode,
-      pageData: {
-        ...pageData,
-        normalized_url: normalizedUrl
-      }
-    };
     } catch (error) {
       // Check if error is due to eval being disabled (CSP)
-      const isEvalDisabled = error.message && error.message.includes('eval is disabled');
-      
+      const isEvalDisabled =
+        error.message && error.message.includes("eval is disabled");
+
       if (isEvalDisabled) {
         // Don't retry - eval won't work on retry either
         console.warn(`⚠️ eval disabled on ${url}, using fallback extraction`);
@@ -998,26 +1636,44 @@ async function crawlPageInternal(context, url, retryCount = 0) {
             title: fallbackData.title,
             links: fallbackData.links,
             statusCode: 200,
-            pageData: fallbackData.pageData
+            pageData: fallbackData.pageData,
           };
         } catch (fallbackError) {
           await page.close();
-          return { title: "Untitled", links: [], statusCode: 0, error: 'eval disabled' };
+          return {
+            title: "Untitled",
+            links: [],
+            statusCode: 0,
+            error: "eval disabled",
+          };
         }
       }
-      
+
       // Retry logic for other errors
       if (retryCount < MAX_RETRIES) {
         const delay = RETRY_DELAY_BASE * Math.pow(2, retryCount);
-        console.warn(`Retrying ${url} (attempt ${retryCount + 1}/${MAX_RETRIES}) after ${delay}ms:`, error.message);
+        console.warn(
+          `Retrying ${url} (attempt ${
+            retryCount + 1
+          }/${MAX_RETRIES}) after ${delay}ms:`,
+          error.message
+        );
         await page.close();
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise((resolve) => setTimeout(resolve, delay));
         return crawlPage(context, url, retryCount + 1);
       }
-      
-      console.warn(`Error crawling ${url} after ${MAX_RETRIES} attempts:`, error.message);
+
+      console.warn(
+        `Error crawling ${url} after ${MAX_RETRIES} attempts:`,
+        error.message
+      );
       await page.close();
-      return { title: "Untitled", links: [], statusCode: 0, error: error.message };
+      return {
+        title: "Untitled",
+        links: [],
+        statusCode: 0,
+        error: error.message,
+      };
     }
   } finally {
     // Ensure page is closed
@@ -1032,104 +1688,325 @@ async function crawlPageInternal(context, url, retryCount = 0) {
 /**
  * Main crawl function - adapted from the provided Playwright crawler
  */
-async function crawlWebsite({ jobId, domain, maxDepth = 3, maxPages = 500, onProgress }) {
-  const baseUrl = domain.startsWith('http') ? domain : `https://${domain}`;
-  const baseDomain = new URL(baseUrl).hostname;
+async function crawlWebsite({
+  jobId,
+  domain,
+  maxDepth = 3,
+  maxPages = 500,
+  onProgress,
+}) {
+  const baseUrl = domain.startsWith("http") ? domain : `https://${domain}`;
 
   const visited = new Set();
   const queue = [{ url: baseUrl, depth: 0, parentUrl: null }];
   const pages = [];
   const CONCURRENCY = 6;
 
-  // Load robots.txt
-  // const robots = await loadRobots(baseUrl);
+  // Error tracking for comprehensive reporting
+  const crawlErrors = {
+    pageErrors: [], // Errors while crawling individual pages
+    sitemapErrors: [], // Errors from sitemap parsing
+    criticalError: null, // Fatal error that stopped the crawl
+    warnings: [], // Non-fatal warnings
+    stats: {
+      totalAttempted: 0,
+      successfulPages: 0,
+      failedPages: 0,
+      skippedPages: 0,
+      sitemapUrlsDiscovered: 0,
+    },
+  };
+
+  console.log(`🚀 Starting crawl for ${baseUrl}`);
+  console.log(`   Max depth: ${maxDepth}, Max pages: ${maxPages}`);
+
+  // Load robots.txt for compliance
+  const robots = await loadRobots(baseUrl);
+
+  // Get crawl delay from robots.txt (default to our min delay if not specified)
+  let crawlDelay = REQUEST_DELAY_MIN;
+  if (robots && typeof robots.getCrawlDelay === "function") {
+    const robotsDelay = robots.getCrawlDelay("*");
+    if (robotsDelay && robotsDelay > 0) {
+      // Convert seconds to milliseconds, respect minimum
+      crawlDelay = Math.max(robotsDelay * 1000, REQUEST_DELAY_MIN);
+      console.log(`🤖 Respecting robots.txt crawl-delay: ${crawlDelay}ms`);
+    }
+  }
+
+  // Try to discover URLs from sitemap.xml
+  console.log(`📍 Checking for sitemap.xml...`);
+  const sitemapResult = await fetchSitemap(baseUrl, robots);
+
+  // Track sitemap-discovered URLs that we'll store directly (without browser crawling)
+  const sitemapPages = [];
+
+  if (sitemapResult.found) {
+    crawlErrors.stats.sitemapUrlsDiscovered = sitemapResult.urls.length;
+
+    // Filter to same domain only
+    const sameDomainUrls = sitemapResult.urls.filter((url) => {
+      try {
+        return sameDomain(url, baseUrl);
+      } catch {
+        return false;
+      }
+    });
+
+    console.log(
+      `📄 Found ${sameDomainUrls.length} same-domain URLs from sitemap`
+    );
+
+    // SMART SITEMAP HANDLING:
+    // - If sitemap has many URLs, store them directly without browser crawling
+    // - Only browser-crawl a sample for content extraction
+    // - Respect maxPages limit
+
+    const SITEMAP_DIRECT_THRESHOLD = 100; // If more than this, store directly
+    const BROWSER_CRAWL_SAMPLE = Math.min(50, maxPages); // How many to actually browser-crawl
+
+    if (sameDomainUrls.length > SITEMAP_DIRECT_THRESHOLD) {
+      console.log(
+        `📊 Large sitemap detected (${sameDomainUrls.length} URLs). Storing URLs directly, browser-crawling sample of ${BROWSER_CRAWL_SAMPLE}`
+      );
+
+      // Limit total URLs to maxPages
+      const urlsToStore = sameDomainUrls.slice(0, maxPages);
+
+      // Store sitemap URLs directly (they're already discovered, no need to crawl)
+      for (const sitemapUrl of urlsToStore) {
+        const normalizedUrl = normalizeUrl(
+          sitemapUrl,
+          sitemapUrl.includes("#/")
+        );
+        if (normalizedUrl && !visited.has(normalizedUrl)) {
+          visited.add(normalizedUrl);
+
+          // Generate title from URL
+          let title = "Page";
+          try {
+            const urlObj = new URL(normalizedUrl);
+            const pathParts = urlObj.pathname.split("/").filter((p) => p);
+            if (pathParts.length > 0) {
+              title = pathParts[pathParts.length - 1]
+                .replace(/-/g, " ")
+                .replace(/_/g, " ")
+                .replace(/\b\w/g, (l) => l.toUpperCase());
+            } else {
+              title = "Home";
+            }
+          } catch {}
+
+          sitemapPages.push({
+            url: normalizedUrl,
+            depth: 1,
+            parentUrl: baseUrl,
+            title: title,
+            fromSitemap: true,
+          });
+        }
+      }
+
+      console.log(
+        `   ✅ Stored ${sitemapPages.length} URLs from sitemap directly`
+      );
+
+      // Add only a sample to the browser crawl queue for content extraction
+      // Prioritize: homepage, then spread across different path prefixes
+      const sampleUrls = selectSampleUrls(sameDomainUrls, BROWSER_CRAWL_SAMPLE);
+
+      for (const sitemapUrl of sampleUrls) {
+        const normalizedUrl = normalizeUrl(
+          sitemapUrl,
+          sitemapUrl.includes("#/")
+        );
+        if (normalizedUrl) {
+          queue.push({
+            url: normalizedUrl,
+            depth: 1,
+            parentUrl: baseUrl,
+            fromSitemap: true,
+            sampleCrawl: true, // Mark as sample crawl for content extraction
+          });
+        }
+      }
+
+      console.log(
+        `   🔍 Added ${sampleUrls.length} URLs to browser crawl queue for content extraction`
+      );
+    } else {
+      // Small sitemap - add all to crawl queue as before
+      console.log(
+        `📄 Adding ${sameDomainUrls.length} URLs from sitemap to crawl queue`
+      );
+
+      for (const sitemapUrl of sameDomainUrls) {
+        const normalizedUrl = normalizeUrl(
+          sitemapUrl,
+          sitemapUrl.includes("#/")
+        );
+        if (normalizedUrl && !visited.has(normalizedUrl)) {
+          queue.push({
+            url: normalizedUrl,
+            depth: 1,
+            parentUrl: baseUrl,
+            fromSitemap: true,
+          });
+        }
+      }
+    }
+  }
+
+  // Record sitemap errors if any
+  if (sitemapResult.errors && sitemapResult.errors.length > 0) {
+    crawlErrors.sitemapErrors = sitemapResult.errors;
+    crawlErrors.warnings.push(
+      `Sitemap parsing had ${sitemapResult.errors.length} error(s)`
+    );
+  }
+
+  // Store sitemap pages directly in database (before browser crawling)
+  if (sitemapPages.length > 0) {
+    console.log(
+      `💾 Storing ${sitemapPages.length} sitemap URLs in database...`
+    );
+    let storedCount = 0;
+    for (const page of sitemapPages) {
+      try {
+        const pageResult = await queryWithRetry(
+          "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
+          [jobId, page.url, page.depth, page.parentUrl, page.title, 200]
+        );
+        if (pageResult.rows.length > 0) {
+          pages.push({
+            id: pageResult.rows[0].id,
+            url: page.url,
+            depth: page.depth,
+            parentUrl: page.parentUrl,
+            title: page.title,
+            fromSitemap: true,
+          });
+          storedCount++;
+        }
+      } catch (dbError) {
+        // Ignore duplicate errors
+        if (!dbError.message.includes("duplicate")) {
+          console.warn(`   ⚠️ Error storing sitemap page: ${dbError.message}`);
+        }
+      }
+    }
+    console.log(`   ✅ Stored ${storedCount} new pages from sitemap`);
+    crawlErrors.stats.successfulPages += storedCount;
+
+    // Report progress
+    if (onProgress) {
+      await onProgress({ pagesCrawled: pages.length });
+    }
+  }
 
   // Launch browser with stealth settings
-  const browser = await chromium.launch({ 
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-features=IsolateOrigins,site-per-process',
-    ]
-  });
-  
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=IsolateOrigins,site-per-process",
+      ],
+    });
+  } catch (browserError) {
+    crawlErrors.criticalError = `Failed to launch browser: ${browserError.message}`;
+    console.error(`❌ ${crawlErrors.criticalError}`);
+    throw new Error(crawlErrors.criticalError);
+  }
+
   // Create context with realistic browser fingerprint
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     viewport: { width: 1920, height: 1080 },
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
+    locale: "en-US",
+    timezoneId: "America/New_York",
     permissions: [],
     extraHTTPHeaders: {
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'DNT': '1',
-      'Connection': 'keep-alive',
-      'Upgrade-Insecure-Requests': '1',
-    }
+      "Accept-Language": "en-US,en;q=0.9",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      "Accept-Encoding": "gzip, deflate, br",
+      DNT: "1",
+      Connection: "keep-alive",
+      "Upgrade-Insecure-Requests": "1",
+    },
   });
-  
+
   // Add stealth scripts to avoid detection
   await context.addInitScript(() => {
     // Override webdriver property
-    Object.defineProperty(navigator, 'webdriver', {
+    Object.defineProperty(navigator, "webdriver", {
       get: () => false,
     });
-    
+
     // Override plugins
-    Object.defineProperty(navigator, 'plugins', {
+    Object.defineProperty(navigator, "plugins", {
       get: () => [1, 2, 3, 4, 5],
     });
-    
+
     // Override languages
-    Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-US', 'en'],
+    Object.defineProperty(navigator, "languages", {
+      get: () => ["en-US", "en"],
     });
-    
+
     // Override chrome
     window.chrome = {
       runtime: {},
     };
-    
+
     // Override permissions
     const originalQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (parameters) => (
-      parameters.name === 'notifications' ?
-        Promise.resolve({ state: Notification.permission }) :
-        originalQuery(parameters)
-    );
+    window.navigator.permissions.query = (parameters) =>
+      parameters.name === "notifications"
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(parameters);
   });
+
+  // Track why crawl stopped (declared outside try block so it's accessible in finally)
+  let stopReason = null;
 
   try {
     let consecutiveFailures = 0;
     const MAX_CONSECUTIVE_FAILURES = 10; // Stop if too many consecutive failures
     let lastProgressTime = Date.now();
     const PROGRESS_TIMEOUT = 300000; // 5 minutes without progress
-    
+
     while (queue.length > 0 && visited.size < maxPages) {
       // Check for timeout without progress
       if (Date.now() - lastProgressTime > PROGRESS_TIMEOUT) {
-        console.warn(`⚠️ Crawl timeout: No progress for ${PROGRESS_TIMEOUT / 1000}s, stopping crawl`);
+        stopReason = `Crawl timeout: No progress for ${
+          PROGRESS_TIMEOUT / 1000
+        } seconds`;
+        crawlErrors.warnings.push(stopReason);
+        console.warn(`⚠️ ${stopReason}`);
         break;
       }
-      
+
       // Check for too many consecutive failures
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.warn(`⚠️ Too many consecutive failures (${consecutiveFailures}), stopping crawl`);
+        stopReason = `Too many consecutive failures (${consecutiveFailures})`;
+        crawlErrors.criticalError = stopReason;
+        console.warn(`⚠️ ${stopReason}, stopping crawl`);
         break;
       }
-      
+
       // Sort queue deterministically before processing to ensure consistent order
       queue.sort((a, b) => {
         // Sort by depth first, then by URL
         if (a.depth !== b.depth) return a.depth - b.depth;
         return a.url.localeCompare(b.url);
       });
-      
+
       const batch = queue.splice(0, CONCURRENCY);
 
       // Use Promise.allSettled to prevent one hanging page from blocking others
@@ -1137,9 +2014,9 @@ async function crawlWebsite({ jobId, domain, maxDepth = 3, maxPages = 500, onPro
         batch.map(async (item) => {
           try {
             // For hash routes, preserve hash; otherwise normalize
-            const hasHashRoute = item.url.includes('#/');
+            const hasHashRoute = item.url.includes("#/");
             const url = normalizeUrl(item.url, hasHashRoute);
-            
+
             // Skip if already visited, invalid, or exceeds depth
             if (!url || visited.has(url) || item.depth > maxDepth) {
               return { success: true, skipped: true };
@@ -1153,148 +2030,273 @@ async function crawlWebsite({ jobId, domain, maxDepth = 3, maxPages = 500, onPro
               return { success: true, skipped: true };
             }
 
-            // Check robots.txt
-            // if (!robots.isAllowed(url, '*')) {
-            //   console.log(`🚫 Blocked by robots.txt: ${url}`);
-            //   return;
-            // }
+            // Check robots.txt compliance
+            if (robots && !robots.isAllowed(url, "*")) {
+              console.log(`🚫 Blocked by robots.txt: ${url}`);
+              return { success: true, skipped: true };
+            }
 
             visited.add(url);
             console.log(`✔ [${item.depth}] ${url}`);
 
-            // Add deterministic delay between requests (based on URL hash for consistency)
-            // This ensures the same URL always gets the same delay, making crawling more deterministic
-            const urlHash = url.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-            const delay = REQUEST_DELAY_MIN + (urlHash % (REQUEST_DELAY_MAX - REQUEST_DELAY_MIN + 1));
-            await new Promise(resolve => setTimeout(resolve, delay));
+            // Add delay between requests - respect robots.txt crawl-delay or use deterministic delay
+            // This ensures polite crawling and the same URL always gets the same delay
+            const urlHash = url
+              .split("")
+              .reduce((acc, char) => acc + char.charCodeAt(0), 0);
+            const baseDelay = Math.max(crawlDelay, REQUEST_DELAY_MIN);
+            const delay =
+              baseDelay + (urlHash % (REQUEST_DELAY_MAX - baseDelay + 1));
+            await new Promise((resolve) => setTimeout(resolve, delay));
 
             // Crawl the page (with timeout protection)
-            const { title, links, statusCode = 200, error, pageData } = await crawlPage(context, url);
+            crawlErrors.stats.totalAttempted++;
+            const {
+              title,
+              links,
+              statusCode = 200,
+              error,
+              pageData,
+            } = await crawlPage(context, url);
 
-          // Clean up title
-          let cleanedTitle = title;
-          if (!cleanedTitle || cleanedTitle === 'ERROR: Error' || cleanedTitle === 'Error' || cleanedTitle === 'ERROR') {
-            try {
-              const urlObj = new URL(url);
-              const hash = urlObj.hash?.substring(1);
-              const pathParts = urlObj.pathname.split('/').filter(p => p);
-              if (hash && hash.startsWith('/')) {
-                cleanedTitle = hash.substring(1).split('/').pop()?.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Page';
-              } else if (hash) {
-                cleanedTitle = hash.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Page';
-              } else {
-                cleanedTitle = pathParts.length > 0 
-                  ? pathParts[pathParts.length - 1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-                  : 'Home';
-              }
-            } catch {
-              cleanedTitle = 'Page';
+            // Track page-level errors
+            if (error) {
+              crawlErrors.stats.failedPages++;
+              crawlErrors.pageErrors.push({
+                url: url,
+                error: error,
+                statusCode: statusCode,
+                depth: item.depth,
+                timestamp: new Date().toISOString(),
+              });
+            } else {
+              crawlErrors.stats.successfulPages++;
             }
-          }
 
-          // Store page in database
-          try {
-            const finalStatusCode = error ? (statusCode || 0) : statusCode;
-            const finalTitle = error ? `ERROR: ${error}` : cleanedTitle;
-            
-            const pageResult = await queryWithRetry(
-              'INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-              [jobId, url, item.depth, item.parentUrl, finalTitle, finalStatusCode]
-            );
-
-            pages.push({
-              id: pageResult.rows[0].id,
-              url: url,
-              depth: item.depth,
-              parentUrl: item.parentUrl,
-              title: cleanedTitle,
-              pageData: pageData || null, // Store enhanced page data
-            });
-          } catch (dbError) {
-            console.error(`Error storing page ${url} in DB:`, dbError.message);
-          }
-
-          // Process links (only if page was successfully crawled)
-          if (!error && links && links.length > 0) {
-            // Sort links deterministically before processing to ensure consistent order
-            const sortedLinks = [...links].sort((a, b) => {
-              // Sort by URL to ensure deterministic order
-              return a.localeCompare(b);
-            });
-            
-            for (const link of sortedLinks) {
+            // Clean up title
+            let cleanedTitle = title;
+            if (
+              !cleanedTitle ||
+              cleanedTitle === "ERROR: Error" ||
+              cleanedTitle === "Error" ||
+              cleanedTitle === "ERROR"
+            ) {
               try {
-                // Validate link URL
-                const linkUrl = new URL(link);
-                
-                // Check if this is a hash route (#/) or hash fragment (#section)
-                const isHashRoute = link.includes('#/');
-                const isHashFragment = link.includes('#') && !link.includes('#/') && link.split('#')[1]?.length > 0;
-                const preserveHash = isHashRoute || isHashFragment;
-                const normalizedLink = normalizeUrl(link, preserveHash);
-                
-                if (
-                  normalizedLink &&
-                  !visited.has(normalizedLink) &&
-                  sameDomain(normalizedLink, baseUrl) &&
-                  item.depth < maxDepth &&
-                  linkUrl.protocol.startsWith('http') // Only HTTP/HTTPS
-                ) {
-                  queue.push({
-                    url: normalizedLink,
-                    depth: item.depth + 1,
-                    parentUrl: url
-                  });
+                const urlObj = new URL(url);
+                const hash = urlObj.hash?.substring(1);
+                const pathParts = urlObj.pathname.split("/").filter((p) => p);
+                if (hash && hash.startsWith("/")) {
+                  cleanedTitle =
+                    hash
+                      .substring(1)
+                      .split("/")
+                      .pop()
+                      ?.replace(/-/g, " ")
+                      .replace(/\b\w/g, (l) => l.toUpperCase()) || "Page";
+                } else if (hash) {
+                  cleanedTitle =
+                    hash
+                      .replace(/-/g, " ")
+                      .replace(/\b\w/g, (l) => l.toUpperCase()) || "Page";
+                } else {
+                  cleanedTitle =
+                    pathParts.length > 0
+                      ? pathParts[pathParts.length - 1]
+                          .replace(/-/g, " ")
+                          .replace(/\b\w/g, (l) => l.toUpperCase())
+                      : "Home";
                 }
-              } catch (linkError) {
-                // Skip invalid links
-                continue;
+              } catch {
+                cleanedTitle = "Page";
               }
             }
-          }
 
-          // Report progress
-          if (onProgress) {
-            await onProgress({ pagesCrawled: pages.length });
-          }
-          
-          return { success: true };
+            // Store page in database
+            try {
+              const finalStatusCode = error ? statusCode || 0 : statusCode;
+              const finalTitle = error ? `ERROR: ${error}` : cleanedTitle;
+
+              const pageResult = await queryWithRetry(
+                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                [
+                  jobId,
+                  url,
+                  item.depth,
+                  item.parentUrl,
+                  finalTitle,
+                  finalStatusCode,
+                ]
+              );
+
+              pages.push({
+                id: pageResult.rows[0].id,
+                url: url,
+                depth: item.depth,
+                parentUrl: item.parentUrl,
+                title: cleanedTitle,
+                pageData: pageData || null, // Store enhanced page data
+              });
+            } catch (dbError) {
+              console.error(
+                `Error storing page ${url} in DB:`,
+                dbError.message
+              );
+            }
+
+            // Process links (only if page was successfully crawled)
+            if (!error && links && links.length > 0) {
+              // Sort links deterministically before processing to ensure consistent order
+              const sortedLinks = [...links].sort((a, b) => {
+                // Sort by URL to ensure deterministic order
+                return a.localeCompare(b);
+              });
+
+              for (const link of sortedLinks) {
+                try {
+                  // Validate link URL
+                  const linkUrl = new URL(link);
+
+                  // Check if this is a hash route (#/) or hash fragment (#section)
+                  const isHashRoute = link.includes("#/");
+                  const isHashFragment =
+                    link.includes("#") &&
+                    !link.includes("#/") &&
+                    link.split("#")[1]?.length > 0;
+                  const preserveHash = isHashRoute || isHashFragment;
+                  const normalizedLink = normalizeUrl(link, preserveHash);
+
+                  if (
+                    normalizedLink &&
+                    !visited.has(normalizedLink) &&
+                    sameDomain(normalizedLink, baseUrl) &&
+                    item.depth < maxDepth &&
+                    linkUrl.protocol.startsWith("http") // Only HTTP/HTTPS
+                  ) {
+                    queue.push({
+                      url: normalizedLink,
+                      depth: item.depth + 1,
+                      parentUrl: url,
+                    });
+                  }
+                } catch (linkError) {
+                  // Skip invalid links
+                  continue;
+                }
+              }
+            }
+
+            // Report progress
+            if (onProgress) {
+              await onProgress({ pagesCrawled: pages.length });
+            }
+
+            return { success: true };
           } catch (error) {
             // Handle errors within the async function
+            crawlErrors.stats.totalAttempted++;
+            crawlErrors.stats.failedPages++;
+
+            const errorInfo = {
+              url: item.url,
+              error: error.message,
+              statusCode: 0,
+              depth: item.depth,
+              timestamp: new Date().toISOString(),
+            };
+            crawlErrors.pageErrors.push(errorInfo);
+
             console.warn(`⚠️ Error crawling ${item.url}:`, error.message);
             try {
               await queryWithRetry(
-                'INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6)',
-                [jobId, item.url, item.depth, item.parentUrl, `ERROR: ${error.message}`, 0]
+                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6)",
+                [
+                  jobId,
+                  item.url,
+                  item.depth,
+                  item.parentUrl,
+                  `ERROR: ${error.message}`,
+                  0,
+                ]
               );
             } catch {}
-            return { success: false, error: error.message };
+            return { success: false, error: error.message, url: item.url };
           }
         })
       );
-      
+
       // Process results - handle both fulfilled and rejected promises
       let batchSuccessCount = 0;
       results.forEach((result) => {
-        if (result.status === 'rejected') {
+        if (result.status === "rejected") {
           consecutiveFailures++;
-          console.warn(`⚠️ Promise rejected:`, result.reason?.message || 'Unknown error');
+          const errorMsg = result.reason?.message || "Unknown error";
+          crawlErrors.pageErrors.push({
+            url: "unknown",
+            error: `Promise rejected: ${errorMsg}`,
+            statusCode: 0,
+            depth: -1,
+            timestamp: new Date().toISOString(),
+          });
+          console.warn(`⚠️ Promise rejected:`, errorMsg);
         } else if (result.value) {
           if (result.value.success && !result.value.skipped) {
             consecutiveFailures = 0; // Reset on success
             batchSuccessCount++;
             lastProgressTime = Date.now(); // Update progress time
+          } else if (result.value.skipped) {
+            crawlErrors.stats.skippedPages++;
           } else if (!result.value.success) {
             consecutiveFailures++;
           }
         }
       });
     }
+
+    // Set stop reason if we completed normally
+    if (!stopReason) {
+      if (visited.size >= maxPages) {
+        stopReason = `Reached max pages limit (${maxPages})`;
+      } else if (queue.length === 0) {
+        stopReason = "All discoverable pages crawled";
+      }
+    }
+  } catch (crawlError) {
+    crawlErrors.criticalError = `Crawl failed: ${crawlError.message}`;
+    console.error(`❌ ${crawlErrors.criticalError}`);
+    throw crawlError;
   } finally {
     await browser.close();
   }
 
-  return pages;
+  // Log final statistics
+  console.log(`\n📊 Crawl Complete for ${baseUrl}`);
+  console.log(`   Pages crawled: ${pages.length}`);
+  console.log(`   Successful: ${crawlErrors.stats.successfulPages}`);
+  console.log(`   Failed: ${crawlErrors.stats.failedPages}`);
+  console.log(`   Skipped: ${crawlErrors.stats.skippedPages}`);
+  if (crawlErrors.stats.sitemapUrlsDiscovered > 0) {
+    console.log(
+      `   URLs from sitemap: ${crawlErrors.stats.sitemapUrlsDiscovered}`
+    );
+  }
+  if (crawlErrors.pageErrors.length > 0) {
+    console.log(
+      `   ⚠️ ${crawlErrors.pageErrors.length} page error(s) occurred`
+    );
+  }
+
+  // Return pages with error summary attached
+  // The error info can be accessed via pages._crawlErrors
+  const result = pages;
+  result._crawlErrors = crawlErrors;
+  result._crawlStats = {
+    totalPages: pages.length,
+    ...crawlErrors.stats,
+    sitemapUsed: crawlErrors.stats.sitemapUrlsDiscovered > 0,
+    stopReason: stopReason,
+  };
+
+  return result;
 }
 
-module.exports = { crawlWebsite };
+module.exports = { crawlWebsite, fetchSitemap };

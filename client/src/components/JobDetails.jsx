@@ -180,9 +180,106 @@ function JobDetails({ job, onClose }) {
                   </div>
                 </div>
               </div>
+              {/* Error/Warning Messages */}
               {details.error_message && (
-                <div className="p-4 rounded-md bg-destructive/10 text-destructive">
-                  <strong>Error:</strong> {details.error_message}
+                <div className={`p-4 rounded-md ${
+                  details.status === 'FAILED' 
+                    ? 'bg-destructive/10 text-destructive border border-destructive/20' 
+                    : 'bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20'
+                }`}>
+                  <div className="flex items-start gap-3">
+                    <svg
+                      className={`h-5 w-5 mt-0.5 flex-shrink-0 ${
+                        details.status === 'FAILED' ? 'text-destructive' : 'text-amber-500'
+                      }`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      {details.status === 'FAILED' ? (
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                      ) : (
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                        />
+                      )}
+                    </svg>
+                    <div>
+                      <strong className="font-semibold">
+                        {details.status === 'FAILED' ? 'Crawl Failed' : 'Completed with Warnings'}
+                      </strong>
+                      <p className="mt-1 text-sm">{details.error_message}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* Crawl Metadata (if available) */}
+              {details.sitemap?.original_sitemap?._crawlMeta && (
+                <div className="p-4 rounded-md bg-muted/50 border">
+                  <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                    </svg>
+                    Crawl Statistics
+                  </h4>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    {details.sitemap.original_sitemap._crawlMeta.stats && (
+                      <>
+                        <div>
+                          <span className="text-muted-foreground">Successful:</span>
+                          <span className="ml-2 font-medium text-green-600 dark:text-green-400">
+                            {details.sitemap.original_sitemap._crawlMeta.stats.successfulPages || 0}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Failed:</span>
+                          <span className={`ml-2 font-medium ${
+                            details.sitemap.original_sitemap._crawlMeta.stats.failedPages > 0 
+                              ? 'text-red-600 dark:text-red-400' 
+                              : ''
+                          }`}>
+                            {details.sitemap.original_sitemap._crawlMeta.stats.failedPages || 0}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Skipped:</span>
+                          <span className="ml-2 font-medium">
+                            {details.sitemap.original_sitemap._crawlMeta.stats.skippedPages || 0}
+                          </span>
+                        </div>
+                        {details.sitemap.original_sitemap._crawlMeta.sitemapUsed && (
+                          <div>
+                            <span className="text-muted-foreground">From Sitemap:</span>
+                            <span className="ml-2 font-medium text-blue-600 dark:text-blue-400">
+                              {details.sitemap.original_sitemap._crawlMeta.stats.sitemapUrlsDiscovered || 0}
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  {details.sitemap.original_sitemap._crawlMeta.sitemapUsed && (
+                    <div className="mt-3 flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
+                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      sitemap.xml was used to discover URLs
+                    </div>
+                  )}
+                  {details.sitemap.original_sitemap._crawlMeta.stopReason && (
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      Stop reason: {details.sitemap.original_sitemap._crawlMeta.stopReason}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
