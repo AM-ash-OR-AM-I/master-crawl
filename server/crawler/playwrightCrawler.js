@@ -1708,11 +1708,13 @@ async function crawlWebsite({
     sitemapErrors: [], // Errors from sitemap parsing
     criticalError: null, // Fatal error that stopped the crawl
     warnings: [], // Non-fatal warnings
+    skippedFiles: [], // Files that were skipped (PDFs, etc.)
     stats: {
       totalAttempted: 0,
       successfulPages: 0,
       failedPages: 0,
       skippedPages: 0,
+      skippedPdfs: 0,
       sitemapUrlsDiscovered: 0,
     },
   };
@@ -1734,128 +1736,14 @@ async function crawlWebsite({
     }
   }
 
-  // Try to discover URLs from sitemap.xml
-  console.log(`📍 Checking for sitemap.xml...`);
-  const sitemapResult = await fetchSitemap(baseUrl, robots);
+  // DISABLED: sitemap.xml usage - use pure crawling for accurate depth tracking
+  // The sitemap.xml approach sets all pages to depth=1 which breaks the tree structure
+  // Pure crawling builds proper parent-child relationships based on link discovery
+  console.log(`🔗 Using pure crawling (sitemap.xml discovery disabled)`);
 
-  // Track sitemap-discovered URLs that we'll store directly (without browser crawling)
+  // Track sitemap-discovered URLs (disabled)
   const sitemapPages = [];
-
-  if (sitemapResult.found) {
-    crawlErrors.stats.sitemapUrlsDiscovered = sitemapResult.urls.length;
-
-    // Filter to same domain only
-    const sameDomainUrls = sitemapResult.urls.filter((url) => {
-      try {
-        return sameDomain(url, baseUrl);
-      } catch {
-        return false;
-      }
-    });
-
-    console.log(
-      `📄 Found ${sameDomainUrls.length} same-domain URLs from sitemap`
-    );
-
-    // SMART SITEMAP HANDLING:
-    // - If sitemap has many URLs, store them directly without browser crawling
-    // - Only browser-crawl a sample for content extraction
-    // - Respect maxPages limit
-
-    const SITEMAP_DIRECT_THRESHOLD = 100; // If more than this, store directly
-    const BROWSER_CRAWL_SAMPLE = Math.min(50, maxPages); // How many to actually browser-crawl
-
-    if (sameDomainUrls.length > SITEMAP_DIRECT_THRESHOLD) {
-      console.log(
-        `📊 Large sitemap detected (${sameDomainUrls.length} URLs). Storing URLs directly, browser-crawling sample of ${BROWSER_CRAWL_SAMPLE}`
-      );
-
-      // Limit total URLs to maxPages
-      const urlsToStore = sameDomainUrls.slice(0, maxPages);
-
-      // Store sitemap URLs directly (they're already discovered, no need to crawl)
-      for (const sitemapUrl of urlsToStore) {
-        const normalizedUrl = normalizeUrl(
-          sitemapUrl,
-          sitemapUrl.includes("#/")
-        );
-        if (normalizedUrl && !visited.has(normalizedUrl)) {
-          visited.add(normalizedUrl);
-
-          // Generate title from URL
-          let title = "Page";
-          try {
-            const urlObj = new URL(normalizedUrl);
-            const pathParts = urlObj.pathname.split("/").filter((p) => p);
-            if (pathParts.length > 0) {
-              title = pathParts[pathParts.length - 1]
-                .replace(/-/g, " ")
-                .replace(/_/g, " ")
-                .replace(/\b\w/g, (l) => l.toUpperCase());
-            } else {
-              title = "Home";
-            }
-          } catch {}
-
-          sitemapPages.push({
-            url: normalizedUrl,
-            depth: 1,
-            parentUrl: baseUrl,
-            title: title,
-            fromSitemap: true,
-          });
-        }
-      }
-
-      console.log(
-        `   ✅ Stored ${sitemapPages.length} URLs from sitemap directly`
-      );
-
-      // Add only a sample to the browser crawl queue for content extraction
-      // Prioritize: homepage, then spread across different path prefixes
-      const sampleUrls = selectSampleUrls(sameDomainUrls, BROWSER_CRAWL_SAMPLE);
-
-      for (const sitemapUrl of sampleUrls) {
-        const normalizedUrl = normalizeUrl(
-          sitemapUrl,
-          sitemapUrl.includes("#/")
-        );
-        if (normalizedUrl) {
-          queue.push({
-            url: normalizedUrl,
-            depth: 1,
-            parentUrl: baseUrl,
-            fromSitemap: true,
-            sampleCrawl: true, // Mark as sample crawl for content extraction
-          });
-        }
-      }
-
-      console.log(
-        `   🔍 Added ${sampleUrls.length} URLs to browser crawl queue for content extraction`
-      );
-    } else {
-      // Small sitemap - add all to crawl queue as before
-      console.log(
-        `📄 Adding ${sameDomainUrls.length} URLs from sitemap to crawl queue`
-      );
-
-      for (const sitemapUrl of sameDomainUrls) {
-        const normalizedUrl = normalizeUrl(
-          sitemapUrl,
-          sitemapUrl.includes("#/")
-        );
-        if (normalizedUrl && !visited.has(normalizedUrl)) {
-          queue.push({
-            url: normalizedUrl,
-            depth: 1,
-            parentUrl: baseUrl,
-            fromSitemap: true,
-          });
-        }
-      }
-    }
-  }
+  const sitemapResult = { found: false, urls: [], errors: [] };
 
   // Record sitemap errors if any
   if (sitemapResult.errors && sitemapResult.errors.length > 0) {
@@ -2156,6 +2044,42 @@ async function crawlWebsite({
                   // Validate link URL
                   const linkUrl = new URL(link);
 
+                  // Skip PDF files and other non-HTML content
+                  const pathname = linkUrl.pathname.toLowerCase();
+                  if (
+                    pathname.endsWith(".pdf") ||
+                    pathname.endsWith(".doc") ||
+                    pathname.endsWith(".docx") ||
+                    pathname.endsWith(".xls") ||
+                    pathname.endsWith(".xlsx") ||
+                    pathname.endsWith(".ppt") ||
+                    pathname.endsWith(".pptx") ||
+                    pathname.endsWith(".zip") ||
+                    pathname.endsWith(".rar") ||
+                    pathname.endsWith(".exe") ||
+                    pathname.endsWith(".dmg") ||
+                    pathname.endsWith(".jpg") ||
+                    pathname.endsWith(".jpeg") ||
+                    pathname.endsWith(".png") ||
+                    pathname.endsWith(".gif") ||
+                    pathname.endsWith(".svg") ||
+                    pathname.endsWith(".mp3") ||
+                    pathname.endsWith(".mp4") ||
+                    pathname.endsWith(".avi") ||
+                    pathname.endsWith(".mov")
+                  ) {
+                    // Track skipped PDFs specifically
+                    if (pathname.endsWith(".pdf")) {
+                      crawlErrors.stats.skippedPdfs++;
+                      crawlErrors.skippedFiles.push({
+                        url: link,
+                        type: "pdf",
+                        foundOn: url,
+                      });
+                    }
+                    continue; // Skip non-HTML files
+                  }
+
                   // Check if this is a hash route (#/) or hash fragment (#section)
                   const isHashRoute = link.includes("#/");
                   const isHashFragment =
@@ -2274,6 +2198,9 @@ async function crawlWebsite({
   console.log(`   Successful: ${crawlErrors.stats.successfulPages}`);
   console.log(`   Failed: ${crawlErrors.stats.failedPages}`);
   console.log(`   Skipped: ${crawlErrors.stats.skippedPages}`);
+  if (crawlErrors.stats.skippedPdfs > 0) {
+    console.log(`   📄 PDFs ignored: ${crawlErrors.stats.skippedPdfs}`);
+  }
   if (crawlErrors.stats.sitemapUrlsDiscovered > 0) {
     console.log(
       `   URLs from sitemap: ${crawlErrors.stats.sitemapUrlsDiscovered}`

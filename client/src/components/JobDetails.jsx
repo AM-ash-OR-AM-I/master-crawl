@@ -256,6 +256,14 @@ function JobDetails({ job, onClose }) {
                             {details.sitemap.original_sitemap._crawlMeta.stats.skippedPages || 0}
                           </span>
                         </div>
+                        {(details.sitemap.original_sitemap._crawlMeta.skippedPdfs > 0 || details.sitemap.original_sitemap._crawlMeta.stats?.skippedPdfs > 0) && (
+                          <div>
+                            <span className="text-muted-foreground">PDFs Ignored:</span>
+                            <span className="ml-2 font-medium text-orange-600 dark:text-orange-400">
+                              {details.sitemap.original_sitemap._crawlMeta.skippedPdfs || details.sitemap.original_sitemap._crawlMeta.stats?.skippedPdfs || 0}
+                            </span>
+                          </div>
+                        )}
                         {details.sitemap.original_sitemap._crawlMeta.sitemapUsed && (
                           <div>
                             <span className="text-muted-foreground">From Sitemap:</span>

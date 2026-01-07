@@ -104,6 +104,8 @@ const crawlWorker = new Worker(
           warnings: crawlErrors.warnings || [],
           sitemapUsed: crawlStats.sitemapUsed || false,
           stopReason: crawlStats.stopReason || "completed",
+          skippedPdfs: crawlStats.skippedPdfs || 0,
+          skippedFiles: crawlErrors.skippedFiles || [],
         };
       }
 
@@ -387,8 +389,8 @@ function buildPathBasedTree(pages, maxChildrenPerNode = 100, maxDepth = 4) {
 }
 
 /**
- * Build sitemap tree structure (SitemapNode format like revize-ai)
- * Always uses path-based grouping to avoid recursion issues with parent-child relationships
+ * Build sitemap tree structure using actual parent-child relationships from crawl data
+ * This reflects the true link hierarchy discovered during crawling
  */
 function buildSitemapStructure(pages) {
   if (!pages || pages.length === 0) {
@@ -402,13 +404,125 @@ function buildSitemapStructure(pages) {
     };
   }
 
-  // Always use path-based tree structure - it's more robust and avoids
-  // stack overflow issues with recursive parent-child relationships
-  const MAX_CHILDREN_PER_NODE = 100;
-  const MAX_TREE_DEPTH = 5;
+  console.log(
+    `📊 Building tree from crawl relationships for ${pages.length} pages`
+  );
 
-  console.log(`📊 Building path-based tree for ${pages.length} pages`);
-  return buildPathBasedTree(pages, MAX_CHILDREN_PER_NODE, MAX_TREE_DEPTH);
+  // Find root URL (homepage)
+  let rootUrl = "";
+  const rootPage =
+    pages.find((p) => {
+      try {
+        const u = new URL(p.url);
+        return (
+          (u.pathname === "/" || u.pathname === "") &&
+          (!u.hash || u.hash === "" || u.hash === "#")
+        );
+      } catch {
+        return false;
+      }
+    }) ||
+    pages.find((p) => p.depth === 0) ||
+    pages[0];
+
+  if (rootPage) {
+    try {
+      const urlObj = new URL(rootPage.url);
+      rootUrl = `${urlObj.protocol}//${urlObj.host}`;
+    } catch {
+      rootUrl = rootPage.url;
+    }
+  }
+
+  // Build a map of pages by URL for quick lookup
+  const pageMap = new Map();
+  pages.forEach((page, idx) => {
+    // Clean up title
+    let title = page.title;
+    if (
+      !title ||
+      title === "ERROR: Error" ||
+      title === "Error" ||
+      title === "ERROR" ||
+      title.startsWith("ERROR:")
+    ) {
+      try {
+        const urlObj = new URL(page.url);
+        const pathParts = urlObj.pathname.split("/").filter((p) => p);
+        title =
+          pathParts.length > 0
+            ? pathParts[pathParts.length - 1]
+                .replace(/-/g, " ")
+                .replace(/\b\w/g, (l) => l.toUpperCase())
+            : "Home";
+      } catch {
+        title = "Page";
+      }
+    }
+
+    pageMap.set(page.url, {
+      id: page.id || `page-${idx}`,
+      url: page.url,
+      title: title,
+      depth: page.depth || 0,
+      parentUrl: page.parentUrl,
+      status: "ok",
+      children: [],
+    });
+  });
+
+  // Build parent-child relationships based on crawl data
+  const rootNodes = [];
+
+  for (const page of pages) {
+    const node = pageMap.get(page.url);
+
+    // If page has a parent and parent exists in our map, add as child
+    if (page.parentUrl && pageMap.has(page.parentUrl)) {
+      const parent = pageMap.get(page.parentUrl);
+      parent.children.push(node);
+    } else if (page.depth === 0 || !page.parentUrl) {
+      // Root level pages (depth 0 or no parent)
+      rootNodes.push(node);
+    } else {
+      // Orphan page (parent not crawled) - add to root
+      rootNodes.push(node);
+    }
+  }
+
+  // Sort children by depth then title for consistent ordering
+  const sortChildren = (node) => {
+    if (node.children && node.children.length > 0) {
+      node.children.sort((a, b) => {
+        if (a.depth !== b.depth) return a.depth - b.depth;
+        return (a.title || "").localeCompare(b.title || "");
+      });
+      node.children.forEach(sortChildren);
+    }
+  };
+
+  // Sort root nodes and their children
+  rootNodes.sort((a, b) => {
+    if (a.depth !== b.depth) return a.depth - b.depth;
+    return (a.title || "").localeCompare(b.title || "");
+  });
+  rootNodes.forEach(sortChildren);
+
+  // If only one root node, return it directly
+  if (rootNodes.length === 1) {
+    return rootNodes[0];
+  }
+
+  // Multiple root nodes - wrap in a container
+  return {
+    id: "root",
+    url: rootUrl,
+    title: "Root",
+    depth: 0,
+    status: "ok",
+    children: rootNodes,
+    pageCount: pages.length,
+  };
 }
 
 module.exports = { crawlQueue, initQueue };
