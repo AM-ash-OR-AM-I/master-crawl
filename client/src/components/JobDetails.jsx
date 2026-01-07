@@ -283,11 +283,36 @@ function JobDetails({ job, onClose }) {
                       sitemap.xml was used to discover URLs
                     </div>
                   )}
-                  {details.sitemap.original_sitemap._crawlMeta.stopReason && (
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      Stop reason: {details.sitemap.original_sitemap._crawlMeta.stopReason}
-                    </div>
-                  )}
+                  {details.sitemap.original_sitemap._crawlMeta.stopReason && (() => {
+                    const stopReason = details.sitemap.original_sitemap._crawlMeta.stopReason;
+                    const isError = stopReason.toLowerCase().includes('failure') || 
+                                   stopReason.toLowerCase().includes('error') ||
+                                   stopReason.toLowerCase().includes('failed');
+                    return (
+                      <div className={`mt-2 text-xs flex items-center gap-2 ${
+                        isError ? 'text-destructive' : 'text-muted-foreground'
+                      }`}>
+                        {isError && (
+                          <svg
+                            className="h-4 w-4 flex-shrink-0"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
+                            />
+                          </svg>
+                        )}
+                        <span>
+                          Stop reason: {stopReason}
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
