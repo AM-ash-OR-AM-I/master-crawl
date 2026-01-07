@@ -83,6 +83,50 @@ function sameDomain(a, b) {
 }
 
 /**
+ * Check if two URLs are from the same site (handles subdomains)
+ * e.g., www.doordash.com and about.doordash.com are considered same site
+ */
+function sameSite(a, b) {
+  try {
+    const hostnameA = new URL(a).hostname;
+    const hostnameB = new URL(b).hostname;
+
+    // Exact match
+    if (hostnameA === hostnameB) return true;
+
+    // Extract root domain (e.g., "doordash.com" from "www.doordash.com" or "about.doordash.com")
+    const getRootDomain = (hostname) => {
+      const parts = hostname.split(".");
+      // Handle cases like "co.uk", "com.au" etc. (2-part TLDs)
+      if (parts.length >= 3) {
+        // Check for known 2-part TLDs
+        const twoPartTlds = [
+          "co.uk",
+          "com.au",
+          "com.br",
+          "co.za",
+          "com.mx",
+          "co.jp",
+        ];
+        const lastTwo = parts.slice(-2).join(".");
+        if (twoPartTlds.includes(lastTwo)) {
+          return parts.slice(-3).join(".");
+        }
+      }
+      // Standard case: last 2 parts (e.g., "doordash.com")
+      return parts.slice(-2).join(".");
+    };
+
+    const rootA = getRootDomain(hostnameA);
+    const rootB = getRootDomain(hostnameB);
+
+    return rootA === rootB;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Select a diverse sample of URLs from a large sitemap
  * Prioritizes: homepage, then spreads across different path prefixes
  */
@@ -1207,6 +1251,8 @@ async function crawlPageInternal(context, url, retryCount = 0) {
       { waitUntil: "networkidle", timeout: PAGE_NAVIGATION_TIMEOUT },
     ];
 
+    let finalUrl = url; // Track final URL after redirects
+
     for (const strategy of strategies) {
       try {
         response = await page.goto(url, strategy);
@@ -1215,6 +1261,29 @@ async function crawlPageInternal(context, url, retryCount = 0) {
         // Get status code
         if (response) {
           statusCode = response.status();
+
+          // Capture final URL after redirects
+          const responseUrl = response.url();
+          if (responseUrl && responseUrl !== url) {
+            finalUrl = responseUrl;
+            // Check if redirect is to a different domain
+            if (!sameDomain(url, finalUrl)) {
+              // Check if it's still part of the same site (e.g., www.doordash.com -> about.doordash.com)
+              if (sameSite(url, finalUrl)) {
+                console.log(
+                  `↪️ Cross-domain redirect (same site): ${url} -> ${finalUrl}`
+                );
+              } else {
+                console.log(
+                  `↪️ Cross-domain redirect (different site): ${url} -> ${finalUrl}`
+                );
+                // For different sites, we'll still crawl but note the redirect
+              }
+            } else {
+              console.log(`↪️ Redirect: ${url} -> ${finalUrl}`);
+            }
+          }
+
           // Check for error status codes
           if (statusCode >= 400) {
             throw new Error(`HTTP ${statusCode}: ${response.statusText()}`);
@@ -1233,8 +1302,36 @@ async function crawlPageInternal(context, url, retryCount = 0) {
       throw new Error("Navigation failed with all strategies");
     }
 
+    // Get final URL from page (handles both HTTP redirects and JavaScript redirects)
+    // This is more reliable than just response.url() as it captures the actual current URL
+    try {
+      const pageUrl = page.url();
+      if (pageUrl && pageUrl !== url) {
+        finalUrl = pageUrl;
+        // Check if redirect is to a different domain
+        if (!sameDomain(url, finalUrl)) {
+          // Check if it's still part of the same site (e.g., www.doordash.com -> about.doordash.com)
+          if (sameSite(url, finalUrl)) {
+            console.log(
+              `↪️ Cross-domain redirect (same site): ${url} -> ${finalUrl}`
+            );
+          } else {
+            console.log(
+              `↪️ Cross-domain redirect (different site): ${url} -> ${finalUrl}`
+            );
+            // For different sites, we'll still crawl but note the redirect
+          }
+        } else {
+          console.log(`↪️ Redirect: ${url} -> ${finalUrl}`);
+        }
+      }
+    } catch {
+      // If we can't get page URL, use response URL or original URL
+      // finalUrl is already set from response.url() above
+    }
+
     // Check if this is a hash route (SPA route)
-    const isHashRoute = url.includes("#/");
+    const isHashRoute = finalUrl.includes("#/");
 
     // For hash routes, wait for the router to navigate first
     if (isHashRoute) {
@@ -1725,8 +1822,10 @@ async function crawlPageInternal(context, url, retryCount = 0) {
 
       // If eval is disabled, use fallback extraction method
       if (!pageData) {
-        console.warn(`⚠️ Using fallback extraction for ${url} (eval disabled)`);
-        const fallbackData = await extractPageDataWithoutEval(page, url);
+        console.warn(
+          `⚠️ Using fallback extraction for ${finalUrl} (eval disabled)`
+        );
+        const fallbackData = await extractPageDataWithoutEval(page, finalUrl);
         pageData = fallbackData.pageData || { links: [] };
         title = fallbackData.title || title;
         links = fallbackData.links || [];
@@ -1745,22 +1844,24 @@ async function crawlPageInternal(context, url, retryCount = 0) {
         ); // Remove duplicates and sort
       }
 
-      // Build normalized URL path
-      let normalizedUrl = url;
+      // Build normalized URL path from final URL (after redirects)
+      let normalizedUrl = finalUrl;
       try {
-        const urlObj = new URL(url);
+        const urlObj = new URL(finalUrl);
         normalizedUrl = urlObj.pathname + (isHashRoute ? urlObj.hash : "");
         if (!normalizedUrl || normalizedUrl === "/") {
           normalizedUrl = "/";
         }
       } catch {
-        normalizedUrl = url;
+        normalizedUrl = finalUrl;
       }
 
       return {
         title,
         links,
         statusCode,
+        finalUrl: finalUrl, // Include final URL after redirects
+        originalUrl: url, // Include original URL for reference
         pageData: {
           ...pageData,
           normalized_url: normalizedUrl,
@@ -1775,12 +1876,19 @@ async function crawlPageInternal(context, url, retryCount = 0) {
         // Don't retry - eval won't work on retry either
         console.warn(`⚠️ eval disabled on ${url}, using fallback extraction`);
         try {
-          const fallbackData = await extractPageDataWithoutEval(page, url);
+          // Get final URL from page (may have redirected)
+          const pageFinalUrl = page.url();
+          const fallbackData = await extractPageDataWithoutEval(
+            page,
+            pageFinalUrl
+          );
           await page.close();
           return {
             title: fallbackData.title,
             links: fallbackData.links,
             statusCode: 200,
+            finalUrl: pageFinalUrl,
+            originalUrl: url,
             pageData: fallbackData.pageData,
           };
         } catch (fallbackError) {
@@ -1790,6 +1898,8 @@ async function crawlPageInternal(context, url, retryCount = 0) {
             links: [],
             statusCode: 0,
             error: "eval disabled",
+            finalUrl: url,
+            originalUrl: url,
           };
         }
       }
@@ -1818,6 +1928,8 @@ async function crawlPageInternal(context, url, retryCount = 0) {
         links: [],
         statusCode: 0,
         error: error.message,
+        finalUrl: url,
+        originalUrl: url,
       };
     }
   } finally {
@@ -2213,7 +2325,25 @@ async function crawlWebsite({
               statusCode = 200,
               error,
               pageData,
+              finalUrl,
+              originalUrl,
             } = await crawlPage(context, url);
+
+            // Use final URL after redirects for storage and link processing
+            const actualUrl = finalUrl || url;
+
+            // If redirect led to an already-visited URL, skip further processing
+            if (actualUrl !== url && hasVisited(visited, actualUrl)) {
+              console.log(
+                `ℹ️  Redirect to already-visited URL: ${url} -> ${actualUrl}`
+              );
+              return { success: true, skipped: true };
+            }
+
+            // Mark final URL as visited to prevent duplicate crawls
+            if (actualUrl !== url) {
+              markVisited(visited, actualUrl);
+            }
 
             // Track page-level errors
             if (error) {
@@ -2267,16 +2397,17 @@ async function crawlWebsite({
               }
             }
 
-            // Store page in database
+            // Store page in database (use final URL after redirects)
             try {
               const finalStatusCode = error ? statusCode || 0 : statusCode;
               const finalTitle = error ? `ERROR: ${error}` : cleanedTitle;
 
+              // Use ON CONFLICT to handle cases where redirect leads to already-crawled URL
               const pageResult = await queryWithRetry(
-                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
                 [
                   jobId,
-                  url,
+                  actualUrl, // Store final URL after redirects
                   item.depth,
                   item.parentUrl,
                   finalTitle,
@@ -2284,22 +2415,39 @@ async function crawlWebsite({
                 ]
               );
 
-              pages.push({
-                id: pageResult.rows[0].id,
-                url: url,
-                depth: item.depth,
-                parentUrl: item.parentUrl,
-                title: cleanedTitle,
-                pageData: pageData || null, // Store enhanced page data
-              });
+              // Only add to pages array if insert was successful (not a duplicate)
+              if (pageResult.rows.length > 0) {
+                pages.push({
+                  id: pageResult.rows[0].id,
+                  url: actualUrl, // Store final URL after redirects
+                  depth: item.depth,
+                  parentUrl: item.parentUrl,
+                  title: cleanedTitle,
+                  pageData: pageData || null, // Store enhanced page data
+                  originalUrl: originalUrl || url, // Track original URL if redirected
+                });
+              } else {
+                // URL already exists (likely from a redirect or direct crawl)
+                // Mark as visited to avoid reprocessing
+                markVisited(visited, actualUrl);
+                console.log(
+                  `ℹ️  URL already exists (redirect duplicate): ${actualUrl}`
+                );
+              }
             } catch (dbError) {
-              console.error(
-                `Error storing page ${url} in DB:`,
-                dbError.message
-              );
+              // Only log if it's not a duplicate key error (which we now handle with ON CONFLICT)
+              if (!dbError.message.includes("duplicate key")) {
+                console.error(
+                  `Error storing page ${actualUrl} in DB:`,
+                  dbError.message
+                );
+              }
             }
 
             // Process links (only if page was successfully crawled)
+            // Use final URL for same-site checking (handles cross-domain redirects within same site)
+            const urlForLinkChecking = actualUrl;
+
             if (!error && links && links.length > 0) {
               // Sort links deterministically before processing to ensure consistent order
               const sortedLinks = [...links].sort((a, b) => {
@@ -2342,7 +2490,7 @@ async function crawlWebsite({
                       crawlErrors.skippedFiles.push({
                         url: link,
                         type: "pdf",
-                        foundOn: url,
+                        foundOn: actualUrl,
                       });
                     }
                     continue; // Skip non-HTML files
@@ -2357,17 +2505,19 @@ async function crawlWebsite({
                   const preserveHash = isHashRoute || isHashFragment;
                   const normalizedLink = normalizeUrl(link, preserveHash);
 
+                  // Use sameSite check instead of sameDomain to handle subdomain redirects
+                  // e.g., www.doordash.com -> about.doordash.com
                   if (
                     normalizedLink &&
                     !hasVisited(visited, normalizedLink) &&
-                    sameDomain(normalizedLink, baseUrl) &&
+                    sameSite(normalizedLink, baseUrl) && // Changed from sameDomain to sameSite
                     item.depth < maxDepth &&
                     linkUrl.protocol.startsWith("http") // Only HTTP/HTTPS
                   ) {
                     queue.push({
                       url: normalizedLink,
                       depth: item.depth + 1,
-                      parentUrl: url,
+                      parentUrl: actualUrl, // Use actual URL after redirects
                     });
                   }
                 } catch (linkError) {
@@ -2400,7 +2550,7 @@ async function crawlWebsite({
             console.warn(`⚠️ Error crawling ${item.url}:`, error.message);
             try {
               await queryWithRetry(
-                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6)",
+                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (job_id, url) DO NOTHING",
                 [
                   jobId,
                   item.url,
@@ -2410,7 +2560,9 @@ async function crawlWebsite({
                   0,
                 ]
               );
-            } catch {}
+            } catch (dbError) {
+              // Ignore database errors (including duplicates)
+            }
             return { success: false, error: error.message, url: item.url };
           }
         })
