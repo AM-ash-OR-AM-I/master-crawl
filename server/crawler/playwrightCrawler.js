@@ -1951,6 +1951,7 @@ async function crawlWebsite({
   maxDepth = 3,
   maxPages = 500,
   useSitemap = false,
+  checkRedirectDuplicates = false, // Default: don't check redirect duplicates
   onProgress,
 }) {
   const baseUrl = domain.startsWith("http") ? domain : `https://${domain}`;
@@ -2329,20 +2330,26 @@ async function crawlWebsite({
               originalUrl,
             } = await crawlPage(context, url);
 
-            // Use final URL after redirects for storage and link processing
-            const actualUrl = finalUrl || url;
+            // Use final URL after redirects ONLY if redirect duplicate checking is enabled
+            // Otherwise, ignore redirects and use original URL (default behavior)
+            const actualUrl = checkRedirectDuplicates ? finalUrl || url : url;
 
-            // If redirect led to an already-visited URL, skip further processing
-            if (actualUrl !== url && hasVisited(visited, actualUrl)) {
+            // If redirect duplicate checking is enabled, check if redirect led to an already-visited URL
+            if (
+              checkRedirectDuplicates &&
+              finalUrl &&
+              finalUrl !== url &&
+              hasVisited(visited, finalUrl)
+            ) {
               console.log(
-                `ℹ️  Redirect to already-visited URL: ${url} -> ${actualUrl}`
+                `ℹ️  Redirect to already-visited URL: ${url} -> ${finalUrl}`
               );
               return { success: true, skipped: true };
             }
 
-            // Mark final URL as visited to prevent duplicate crawls
-            if (actualUrl !== url) {
-              markVisited(visited, actualUrl);
+            // Mark final URL as visited to prevent duplicate crawls (only if redirect duplicate checking is enabled)
+            if (checkRedirectDuplicates && finalUrl && finalUrl !== url) {
+              markVisited(visited, finalUrl);
             }
 
             // Track page-level errors
@@ -2397,17 +2404,20 @@ async function crawlWebsite({
               }
             }
 
-            // Store page in database (use final URL after redirects)
+            // Store page in database
+            // Use final URL after redirects ONLY if redirect duplicate checking is enabled
+            // Otherwise, use original URL (ignore redirects)
             try {
               const finalStatusCode = error ? statusCode || 0 : statusCode;
               const finalTitle = error ? `ERROR: ${error}` : cleanedTitle;
+              const urlToStore = checkRedirectDuplicates ? actualUrl : url;
 
               // Use ON CONFLICT to handle cases where redirect leads to already-crawled URL
               const pageResult = await queryWithRetry(
                 "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
                 [
                   jobId,
-                  actualUrl, // Store final URL after redirects
+                  urlToStore, // Store final URL if redirect checking enabled, otherwise original URL
                   item.depth,
                   item.parentUrl,
                   finalTitle,
@@ -2419,34 +2429,42 @@ async function crawlWebsite({
               if (pageResult.rows.length > 0) {
                 pages.push({
                   id: pageResult.rows[0].id,
-                  url: actualUrl, // Store final URL after redirects
+                  url: urlToStore,
                   depth: item.depth,
                   parentUrl: item.parentUrl,
                   title: cleanedTitle,
                   pageData: pageData || null, // Store enhanced page data
-                  originalUrl: originalUrl || url, // Track original URL if redirected
+                  originalUrl: checkRedirectDuplicates
+                    ? originalUrl || url
+                    : undefined, // Only track original if redirect checking enabled
                 });
               } else {
                 // URL already exists (likely from a redirect or direct crawl)
-                // Mark as visited to avoid reprocessing
-                markVisited(visited, actualUrl);
-                console.log(
-                  `ℹ️  URL already exists (redirect duplicate): ${actualUrl}`
-                );
+                // Only log and mark as visited if redirect duplicate checking is enabled
+                if (checkRedirectDuplicates) {
+                  markVisited(visited, urlToStore);
+                  console.log(
+                    `ℹ️  URL already exists (redirect duplicate): ${urlToStore}`
+                  );
+                }
+                // When toggle is off, silently skip duplicates (they're just regular DB duplicates)
               }
             } catch (dbError) {
               // Only log if it's not a duplicate key error (which we now handle with ON CONFLICT)
               if (!dbError.message.includes("duplicate key")) {
                 console.error(
-                  `Error storing page ${actualUrl} in DB:`,
+                  `Error storing page ${urlToStore} in DB:`,
                   dbError.message
                 );
               }
             }
 
             // Process links (only if page was successfully crawled)
-            // Use final URL for same-site checking (handles cross-domain redirects within same site)
-            const urlForLinkChecking = actualUrl;
+            // Use final URL for same-site checking ONLY if redirect duplicate checking is enabled
+            // Otherwise, use original URL (ignore redirects)
+            const urlForLinkChecking = checkRedirectDuplicates
+              ? actualUrl
+              : url;
 
             if (!error && links && links.length > 0) {
               // Sort links deterministically before processing to ensure consistent order
@@ -2517,7 +2535,7 @@ async function crawlWebsite({
                     queue.push({
                       url: normalizedLink,
                       depth: item.depth + 1,
-                      parentUrl: actualUrl, // Use actual URL after redirects
+                      parentUrl: checkRedirectDuplicates ? actualUrl : url, // Use actual URL after redirects only if redirect checking enabled
                     });
                   }
                 } catch (linkError) {

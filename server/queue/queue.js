@@ -31,7 +31,14 @@ const crawlQueue = new Queue("crawl-queue", { connection });
 const crawlWorker = new Worker(
   "crawl-queue",
   async (job) => {
-    const { jobId, domain, maxDepth, maxPages, useSitemap = false } = job.data;
+    const {
+      jobId,
+      domain,
+      maxDepth,
+      maxPages,
+      useSitemap = false,
+      checkRedirectDuplicates = false,
+    } = job.data;
 
     try {
       // Update status to CRAWLING
@@ -48,6 +55,7 @@ const crawlWorker = new Worker(
         maxDepth,
         maxPages,
         useSitemap,
+        checkRedirectDuplicates: checkRedirectDuplicates,
         onProgress: async (progress) => {
           await queryWithRetry(
             "UPDATE crawl_jobs SET pages_crawled = $1 WHERE id = $2",

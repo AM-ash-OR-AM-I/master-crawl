@@ -62,13 +62,14 @@ function App() {
     }
   };
 
-  const handleNewCrawl = async (websites, maxDepth, maxPages, useSitemap = false) => {
+  const handleNewCrawl = async (websites, maxDepth, maxPages, useSitemap = false, checkRedirectDuplicates = false) => {
     try {
       const response = await axios.post(`${API_BASE}/crawl`, {
         websites,
         maxDepth,
         maxPages,
         useSitemap,
+        checkRedirectDuplicates,
       });
       
       // Refresh jobs list
