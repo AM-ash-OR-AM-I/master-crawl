@@ -82,6 +82,17 @@ function App() {
     }
   };
 
+  const handleDeleteJob = async (jobId) => {
+    try {
+      await axios.delete(`${API_BASE}/crawl/${jobId}`);
+      // Refresh jobs list
+      await fetchJobs();
+    } catch (error) {
+      console.error('Error deleting job:', error);
+      alert(error.response?.data?.error || 'Failed to delete job');
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -97,7 +108,7 @@ function App() {
       <main className="container px-4 md:px-6 py-8">
         <div className="max-w-4xl mx-auto space-y-6">
           <NewCrawlForm onSubmit={handleNewCrawl} />
-          <CrawlDashboard jobs={jobs} onRefresh={fetchJobs} />
+          <CrawlDashboard jobs={jobs} onRefresh={fetchJobs} onDelete={handleDeleteJob} />
         </div>
       </main>
     </div>
