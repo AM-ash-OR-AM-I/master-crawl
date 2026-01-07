@@ -2246,7 +2246,7 @@ async function crawlWebsite({
 
   try {
     let consecutiveFailures = 0;
-    const MAX_CONSECUTIVE_FAILURES = 20; // Stop if too many consecutive failures
+    const MAX_CONSECUTIVE_FAILURES = 1000; // Stop if too many consecutive failures
     let lastProgressTime = Date.now();
     const PROGRESS_TIMEOUT = 300000; // 5 minutes without progress
 
