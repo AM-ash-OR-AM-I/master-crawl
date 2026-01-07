@@ -171,39 +171,88 @@ function buildTreeText(node, prefix, isLast) {
 /**
  * Generate JSON sitemap (already exists, but ensure it's complete)
  */
+/**
+ * Generate JSON sitemap for architecture redesign
+ * Separates working pages from broken links for clean planning
+ */
 function generateJSONSitemap(pages) {
-  // Clean up titles - replace "ERROR: Error" with better titles
-  const cleanedPages = pages.map(page => {
-    let title = page.title;
-    if (!title || title === 'ERROR: Error' || title === 'Error' || title === 'ERROR') {
+  const workingPages = [];
+  const brokenLinks = [];
+  
+  pages.forEach(page => {
+    const title = page.title || '';
+    const isError = title.startsWith('ERROR:') || title === 'Error' || title === 'ERROR';
+    
+    if (isError) {
+      // Extract error type
+      let errorType = 'Unknown Error';
+      if (title.includes('404')) errorType = '404 Not Found';
+      else if (title.includes('403')) errorType = '403 Forbidden';
+      else if (title.includes('500')) errorType = '500 Server Error';
+      else if (title.includes('timeout')) errorType = 'Timeout';
+      else if (title.startsWith('ERROR:')) errorType = title.replace('ERROR:', '').trim() || 'Error';
+      
+      // Generate URL-based title
+      let suggestedTitle = 'Page';
       try {
         const urlObj = new URL(page.url);
-        const hash = urlObj.hash?.substring(1);
         const pathParts = urlObj.pathname.split('/').filter(p => p);
-        if (hash && hash.startsWith('/')) {
-          title = hash.substring(1).split('/').pop()?.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Page';
-        } else {
-          title = pathParts.length > 0 
-            ? pathParts[pathParts.length - 1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-            : 'Home';
+        if (pathParts.length > 0) {
+          suggestedTitle = pathParts[pathParts.length - 1]
+            .replace(/-/g, ' ')
+            .replace(/_/g, ' ')
+            .replace(/\b\w/g, l => l.toUpperCase());
         }
-      } catch {
-        title = 'Page';
+      } catch {}
+      
+      brokenLinks.push({
+        url: page.url,
+        errorType: errorType,
+        suggestedTitle: suggestedTitle,
+        parentUrl: page.parentUrl,
+        depth: page.depth,
+        recommendation: errorType === '404 Not Found' ? 'Redirect or Remove' : 'Investigate'
+      });
+    } else {
+      // Clean up title
+      let cleanTitle = title;
+      if (!cleanTitle || cleanTitle === 'Untitled') {
+        try {
+          const urlObj = new URL(page.url);
+          const hash = urlObj.hash?.substring(1);
+          const pathParts = urlObj.pathname.split('/').filter(p => p);
+          if (hash && hash.startsWith('/')) {
+            cleanTitle = hash.substring(1).split('/').pop()?.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Page';
+          } else {
+            cleanTitle = pathParts.length > 0 
+              ? pathParts[pathParts.length - 1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+              : 'Home';
+          }
+        } catch {
+          cleanTitle = 'Page';
+        }
       }
+      
+      workingPages.push({
+        url: page.url,
+        title: cleanTitle,
+        depth: page.depth,
+        parentUrl: page.parentUrl
+      });
     }
-    return {
-      url: page.url,
-      title: title,
-      depth: page.depth,
-      parentUrl: page.parentUrl
-    };
   });
   
   return {
     version: '1.0',
-    totalPages: cleanedPages.length,
     generatedAt: new Date().toISOString(),
-    pages: cleanedPages
+    summary: {
+      totalPages: workingPages.length,
+      brokenLinks: brokenLinks.length
+    },
+    pages: workingPages,
+    issues: {
+      brokenLinks: brokenLinks
+    }
   };
 }
 
@@ -224,76 +273,214 @@ function calculatePriority(depth) {
 
 /**
  * Generate Excel sitemap from pages with hierarchical structure
+ * For sitemap architecture redesign:
+ * - Sheet 1: "Sitemap" - Clean hierarchy of working pages only
+ * - Sheet 2: "Broken Links" - 404s and errors to fix/redirect
  */
 function generateExcelSitemap(pages, baseUrl) {
-  // Clean up titles
-  const cleanedPages = pages.map(page => {
-    let title = page.title;
-    if (!title || title === 'ERROR: Error' || title === 'Error' || title === 'ERROR') {
+  // Separate working pages from error pages
+  const workingPages = [];
+  const brokenLinks = [];
+  
+  pages.forEach(page => {
+    const title = page.title || '';
+    const isError = title.startsWith('ERROR:') || title === 'Error' || title === 'ERROR';
+    
+    if (isError) {
+      // Extract error type
+      let errorType = 'Unknown Error';
+      if (title.includes('404')) errorType = '404 Not Found';
+      else if (title.includes('403')) errorType = '403 Forbidden';
+      else if (title.includes('500')) errorType = '500 Server Error';
+      else if (title.includes('timeout')) errorType = 'Timeout';
+      else if (title.startsWith('ERROR:')) errorType = title.replace('ERROR:', '').trim() || 'Error';
+      
+      // Generate URL-based title for the broken link
+      let suggestedTitle = 'Page';
       try {
         const urlObj = new URL(page.url);
-        const hash = urlObj.hash?.substring(1);
         const pathParts = urlObj.pathname.split('/').filter(p => p);
-        if (hash && hash.startsWith('/')) {
-          title = hash.substring(1).split('/').pop()?.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Page';
-        } else {
-          title = pathParts.length > 0 
-            ? pathParts[pathParts.length - 1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-            : 'Home';
+        if (pathParts.length > 0) {
+          suggestedTitle = pathParts[pathParts.length - 1]
+            .replace(/-/g, ' ')
+            .replace(/_/g, ' ')
+            .replace(/\b\w/g, l => l.toUpperCase());
         }
-      } catch {
-        title = 'Page';
+      } catch {}
+      
+      brokenLinks.push({
+        url: page.url,
+        errorType: errorType,
+        suggestedTitle: suggestedTitle,
+        parentUrl: page.parentUrl || '',
+        depth: page.depth
+      });
+    } else {
+      // Clean up title
+      let cleanTitle = title;
+      if (!cleanTitle || cleanTitle === 'Untitled') {
+        try {
+          const urlObj = new URL(page.url);
+          const hash = urlObj.hash?.substring(1);
+          const pathParts = urlObj.pathname.split('/').filter(p => p);
+          if (hash && hash.startsWith('/')) {
+            cleanTitle = hash.substring(1).split('/').pop()?.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'Page';
+          } else {
+            cleanTitle = pathParts.length > 0 
+              ? pathParts[pathParts.length - 1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+              : 'Home';
+          }
+        } catch {
+          cleanTitle = 'Page';
+        }
       }
+      
+      workingPages.push({
+        url: page.url,
+        title: cleanTitle,
+        depth: page.depth,
+        parentUrl: page.parentUrl || ''
+      });
     }
-    return {
-      url: page.url,
-      title: title,
-      depth: page.depth,
-      parentUrl: page.parentUrl || ''
-    };
   });
 
-  // Sort pages by depth and title for consistent ordering
-  const sortedPages = [...cleanedPages].sort((a, b) => {
-    if (a.depth !== b.depth) return a.depth - b.depth;
-    return (a.title || '').localeCompare(b.title || '');
+  // Build a map of working pages by URL for parent lookup
+  const pageMap = new Map();
+  workingPages.forEach(page => {
+    pageMap.set(page.url, page);
+  });
+
+  // Build tree structure for proper ordering (working pages only)
+  const rootNodes = [];
+  const childrenMap = new Map();
+  
+  // Initialize children map
+  workingPages.forEach(page => {
+    childrenMap.set(page.url, []);
   });
   
-  // Create rows using the actual depth from crawl data
-  const hierarchicalRows = sortedPages.map(page => {
-    // Use the actual crawl depth to place the title in the correct column
+  // Build parent-child relationships
+  workingPages.forEach(page => {
+    if (page.parentUrl && pageMap.has(page.parentUrl)) {
+      const children = childrenMap.get(page.parentUrl) || [];
+      children.push(page);
+      childrenMap.set(page.parentUrl, children);
+    } else if (page.depth === 0 || !page.parentUrl) {
+      rootNodes.push(page);
+    } else {
+      // Orphan - add to root
+      rootNodes.push(page);
+    }
+  });
+
+  // Flatten tree in DFS order (to match tree view order)
+  const orderedPages = [];
+  const flattenTree = (node, ancestorTitles = []) => {
+    orderedPages.push({ page: node, ancestorTitles: [...ancestorTitles] });
+    
+    const children = childrenMap.get(node.url) || [];
+    // Sort children by title for consistent ordering
+    children.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+    
+    children.forEach(child => {
+      flattenTree(child, [...ancestorTitles, node.title]);
+    });
+  };
+  
+  // Sort root nodes and flatten
+  rootNodes.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  rootNodes.forEach(root => flattenTree(root, []));
+  
+  // Create rows with full hierarchy path (working pages only)
+  const hierarchicalRows = orderedPages.map(({ page, ancestorTitles }) => {
     const depth = page.depth || 0;
+    const fullPath = [...ancestorTitles];
+    
+    const row = {
+      'Top Level Navigation Landing Page (1st level)': '',
+      '2nd Level Subpage': '',
+      '3rd Level Subpage': '',
+      '4th Level Subpage': '',
+      '5th Level Subpage': '',
+      '6th Level Subpage': '',
+      '7th Level Subpage': '',
+      'URL': page.url,
+      'Notes': ''
+    };
+    
+    // Fill in ancestor titles
+    fullPath.forEach((title, idx) => {
+      if (idx === 0) row['Top Level Navigation Landing Page (1st level)'] = title;
+      else if (idx === 1) row['2nd Level Subpage'] = title;
+      else if (idx === 2) row['3rd Level Subpage'] = title;
+      else if (idx === 3) row['4th Level Subpage'] = title;
+      else if (idx === 4) row['5th Level Subpage'] = title;
+      else if (idx === 5) row['6th Level Subpage'] = title;
+      else if (idx >= 6) row['7th Level Subpage'] = title;
+    });
+    
+    // Place current page title at its depth level
+    if (depth === 0) row['Top Level Navigation Landing Page (1st level)'] = page.title;
+    else if (depth === 1) row['2nd Level Subpage'] = page.title;
+    else if (depth === 2) row['3rd Level Subpage'] = page.title;
+    else if (depth === 3) row['4th Level Subpage'] = page.title;
+    else if (depth === 4) row['5th Level Subpage'] = page.title;
+    else if (depth === 5) row['6th Level Subpage'] = page.title;
+    else if (depth >= 6) row['7th Level Subpage'] = page.title;
+    
+    return row;
+  });
+  
+  // Create broken links rows
+  const brokenLinksRows = brokenLinks.map(link => {
+    // Find parent page title if it exists
+    let foundOnPage = link.parentUrl;
+    const parentPage = pageMap.get(link.parentUrl);
+    if (parentPage) {
+      foundOnPage = `${parentPage.title} (${link.parentUrl})`;
+    }
     
     return {
-      'Top Level Navigation Landing Page (1st level)': depth === 0 ? page.title : '',
-      '2nd Level Subpage': depth === 1 ? page.title : '',
-      '3rd Level Subpage': depth === 2 ? page.title : '',
-      '4th Level Subpage': depth === 3 ? page.title : '',
-      '5th Level Subpage': depth === 4 ? page.title : '',
-      '6th Level Subpage': depth === 5 ? page.title : '',
-      '7th Level Subpage': depth >= 6 ? page.title : '',
-      'Notes': ''
+      'Broken URL': link.url,
+      'Error Type': link.errorType,
+      'Suggested Title': link.suggestedTitle,
+      'Found On Page': foundOnPage,
+      'Depth': link.depth,
+      'Recommendation': link.errorType === '404 Not Found' ? 'Redirect or Remove' : 'Investigate'
     };
   });
   
-  // Create workbook and worksheet
+  // Create workbook
   const workbook = XLSX.utils.book_new();
-  const worksheet = XLSX.utils.json_to_sheet(hierarchicalRows);
   
-  // Set column widths
-  worksheet['!cols'] = [
-    { wch: 40 }, // Top Level Navigation Landing Page (1st level)
-    { wch: 35 }, // 2nd Level Subpage
-    { wch: 35 }, // 3rd Level Subpage
-    { wch: 35 }, // 4th Level Subpage
-    { wch: 35 }, // 5th Level Subpage
-    { wch: 35 }, // 6th Level Subpage
-    { wch: 35 }, // 7th Level Subpage
+  // Sheet 1: Clean Sitemap (working pages only)
+  const sitemapSheet = XLSX.utils.json_to_sheet(hierarchicalRows);
+  sitemapSheet['!cols'] = [
+    { wch: 45 }, // 1st level
+    { wch: 40 }, // 2nd level
+    { wch: 40 }, // 3rd level
+    { wch: 40 }, // 4th level
+    { wch: 40 }, // 5th level
+    { wch: 40 }, // 6th level
+    { wch: 40 }, // 7th level
+    { wch: 60 }, // URL
     { wch: 30 }  // Notes
   ];
+  XLSX.utils.book_append_sheet(workbook, sitemapSheet, 'Sitemap');
   
-  // Add worksheet to workbook
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Sitemap');
+  // Sheet 2: Broken Links (if any)
+  if (brokenLinksRows.length > 0) {
+    const brokenLinksSheet = XLSX.utils.json_to_sheet(brokenLinksRows);
+    brokenLinksSheet['!cols'] = [
+      { wch: 60 }, // Broken URL
+      { wch: 20 }, // Error Type
+      { wch: 30 }, // Suggested Title
+      { wch: 60 }, // Found On Page
+      { wch: 10 }, // Depth
+      { wch: 25 }  // Recommendation
+    ];
+    XLSX.utils.book_append_sheet(workbook, brokenLinksSheet, 'Broken Links');
+  }
   
   // Generate Excel file buffer
   const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });

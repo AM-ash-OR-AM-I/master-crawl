@@ -1015,15 +1015,52 @@ async function extractPageDataWithoutEval(page, url) {
     const links = [];
 
     // Extract title using locator (doesn't need eval)
+    // Priority: og:title > h1 > title tag (to avoid generic site titles)
     let title = "Untitled";
     try {
-      const titleElement = page.locator("title").first();
-      if ((await titleElement.count()) > 0) {
-        title = (await titleElement.textContent()) || "Untitled";
-      } else {
+      // Try og:title first (usually page-specific)
+      const ogTitleElement = page.locator('meta[property="og:title"]').first();
+      if ((await ogTitleElement.count()) > 0) {
+        const ogTitle = await ogTitleElement.getAttribute("content");
+        if (ogTitle && ogTitle.trim()) {
+          title = ogTitle.trim();
+        }
+      }
+
+      // If no og:title, try h1 (main page heading)
+      if (title === "Untitled") {
         const h1Element = page.locator("h1").first();
         if ((await h1Element.count()) > 0) {
-          title = (await h1Element.textContent()) || "Untitled";
+          const h1Text = await h1Element.textContent();
+          if (h1Text && h1Text.trim() && h1Text.trim().length < 200) {
+            title = h1Text.trim();
+          }
+        }
+      }
+
+      // Fallback to title tag
+      if (title === "Untitled") {
+        const titleElement = page.locator("title").first();
+        if ((await titleElement.count()) > 0) {
+          title = (await titleElement.textContent()) || "Untitled";
+        }
+      }
+
+      // Final fallback: generate from URL
+      if (title === "Untitled" || title.length < 3) {
+        try {
+          const urlObj = new URL(url);
+          const pathParts = urlObj.pathname.split("/").filter((p) => p);
+          if (pathParts.length > 0) {
+            title = pathParts[pathParts.length - 1]
+              .replace(/-/g, " ")
+              .replace(/_/g, " ")
+              .replace(/\b\w/g, (l) => l.toUpperCase());
+          } else {
+            title = "Home";
+          }
+        } catch {
+          title = "Page";
         }
       }
     } catch {}
@@ -1337,18 +1374,51 @@ async function crawlPageInternal(context, url, retryCount = 0) {
       const pageInfo = await safeEvaluate(
         page,
         (isHashRoute) => {
-          // Try multiple selectors for title
+          // Try multiple selectors for title - prioritize page-specific content over generic site title
           const titleEl = document.querySelector("title");
           const h1El = document.querySelector("h1");
           const h2El = document.querySelector("h2");
           const metaTitle = document.querySelector('meta[property="og:title"]');
+          const metaTwitterTitle = document.querySelector(
+            'meta[name="twitter:title"]'
+          );
 
+          // Get all possible title sources
+          const titleTag = titleEl?.textContent?.trim() || "";
+          const ogTitle = metaTitle?.getAttribute("content")?.trim() || "";
+          const twitterTitle =
+            metaTwitterTitle?.getAttribute("content")?.trim() || "";
+          const h1Text = h1El?.textContent?.trim() || "";
+          const h2Text = h2El?.textContent?.trim() || "";
+
+          // Prefer page-specific titles (og:title, h1) over generic <title> tag
+          // Many sites have generic titles like "Company Name" in <title> but specific content in h1/og:title
           let titleText = "";
-          if (titleEl) titleText = titleEl.textContent?.trim() || "";
-          if (!titleText && metaTitle)
-            titleText = metaTitle.getAttribute("content")?.trim() || "";
-          if (!titleText && h1El) titleText = h1El.textContent?.trim() || "";
-          if (!titleText && h2El) titleText = h2El.textContent?.trim() || "";
+
+          // First priority: og:title (usually page-specific)
+          if (ogTitle && ogTitle.length > 0 && ogTitle.length < 200) {
+            titleText = ogTitle;
+          }
+          // Second priority: twitter:title
+          else if (
+            twitterTitle &&
+            twitterTitle.length > 0 &&
+            twitterTitle.length < 200
+          ) {
+            titleText = twitterTitle;
+          }
+          // Third priority: h1 (usually the main page heading)
+          else if (h1Text && h1Text.length > 0 && h1Text.length < 200) {
+            titleText = h1Text;
+          }
+          // Fourth priority: <title> tag (may be generic)
+          else if (titleTag && titleTag.length > 0) {
+            titleText = titleTag;
+          }
+          // Fifth priority: h2
+          else if (h2Text && h2Text.length > 0 && h2Text.length < 200) {
+            titleText = h2Text;
+          }
 
           // For hash routes, also check for route-specific content
           if (isHashRoute && !titleText) {
@@ -1370,13 +1440,57 @@ async function crawlPageInternal(context, url, retryCount = 0) {
             title: titleText || "Untitled",
             hasContent:
               document.body && document.body.textContent.trim().length > 50,
+            // Return all sources for debugging/fallback
+            sources: { titleTag, ogTitle, twitterTitle, h1Text, h2Text },
           };
         },
-        { title: "Untitled", hasContent: false },
+        { title: "Untitled", hasContent: false, sources: {} },
         isHashRoute
       );
 
       title = pageInfo.title;
+
+      // If title looks like a generic site name (very short or doesn't contain URL keywords), try URL-based title
+      if (title && title.length < 50) {
+        try {
+          const urlObj = new URL(url);
+          const pathParts = urlObj.pathname.split("/").filter((p) => p);
+          if (pathParts.length > 0) {
+            const lastPathPart = pathParts[pathParts.length - 1]
+              .replace(/-/g, " ")
+              .replace(/_/g, " ")
+              .toLowerCase();
+
+            // Check if the title doesn't seem related to the URL path
+            // This catches cases where title is just "Company Name" for all pages
+            const titleLower = title.toLowerCase();
+            const pathKeywords = lastPathPart
+              .split(" ")
+              .filter((w) => w.length > 3);
+            const hasPathKeyword = pathKeywords.some((kw) =>
+              titleLower.includes(kw)
+            );
+
+            // If title doesn't contain any path keywords and h1 exists, prefer URL-based title
+            if (
+              !hasPathKeyword &&
+              pathParts.length > 0 &&
+              pageInfo.sources?.h1Text
+            ) {
+              // Keep h1 if it exists
+            } else if (!hasPathKeyword && pathParts.length > 0) {
+              // Use URL-based title as fallback
+              const urlTitle = pathParts[pathParts.length - 1]
+                .replace(/-/g, " ")
+                .replace(/_/g, " ")
+                .replace(/\b\w/g, (l) => l.toUpperCase());
+              if (urlTitle.length > 2) {
+                title = urlTitle;
+              }
+            }
+          }
+        } catch {}
+      }
 
       // If title is still "Just a moment" or similar, use URL-based fallback immediately
       if (
