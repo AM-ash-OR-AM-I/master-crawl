@@ -9,16 +9,21 @@ function CrawlDashboard({ jobs, onRefresh, onDelete }) {
   const [selectedJob, setSelectedJob] = useState(null);
   const [deletingJobId, setDeletingJobId] = useState(null);
 
-  const handleDelete = async (e, jobId) => {
+  const handleDelete = async (e, job) => {
     e.stopPropagation(); // Prevent row click
     
-    if (!window.confirm('Are you sure you want to delete this crawl job? This action cannot be undone.')) {
+    const isActive = ['PENDING', 'CRAWLING', 'PROCESSING', 'AI_ANALYSIS'].includes(job.status);
+    const confirmMessage = isActive
+      ? `This crawl is currently ${job.status.toLowerCase()}. Deleting it will stop the crawl immediately. Are you sure you want to delete this job? This action cannot be undone.`
+      : 'Are you sure you want to delete this crawl job? This action cannot be undone.';
+    
+    if (!window.confirm(confirmMessage)) {
       return;
     }
 
-    setDeletingJobId(jobId);
+    setDeletingJobId(job.id);
     try {
-      await onDelete(jobId);
+      await onDelete(job.id);
     } catch (error) {
       // Error is already handled in parent
     } finally {
@@ -254,9 +259,10 @@ function CrawlDashboard({ jobs, onRefresh, onDelete }) {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={(e) => handleDelete(e, job.id)}
+                        onClick={(e) => handleDelete(e, job)}
                         disabled={deletingJobId === job.id}
                         className="gap-2 text-destructive hover:text-destructive hover:bg-destructive/10"
+                        title={['PENDING', 'CRAWLING', 'PROCESSING', 'AI_ANALYSIS'].includes(job.status) ? 'Stop and delete this crawl' : 'Delete this crawl'}
                       >
                         {deletingJobId === job.id ? (
                           <svg

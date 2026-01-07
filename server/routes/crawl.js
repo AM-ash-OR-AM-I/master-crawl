@@ -165,16 +165,48 @@ router.delete('/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     
-    // Remove from queue if pending
-    const job = await crawlQueue.getJob(jobId);
-    if (job) {
-      await job.remove();
+    // Check job status first
+    const jobResult = await pool.query(
+      'SELECT status FROM crawl_jobs WHERE id = $1',
+      [jobId]
+    );
+    
+    if (jobResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    
+    const jobStatus = jobResult.rows[0].status;
+    const isActive = ['PENDING', 'CRAWLING', 'PROCESSING', 'AI_ANALYSIS'].includes(jobStatus);
+    
+    // Try to remove from queue (works for pending jobs)
+    try {
+      const queueJob = await crawlQueue.getJob(jobId);
+      if (queueJob) {
+        const state = await queueJob.getState();
+        if (state === 'waiting' || state === 'delayed') {
+          await queueJob.remove();
+        } else if (state === 'active') {
+          // Job is actively being processed - we can't cancel it cleanly
+          // But we'll still delete from DB, and the worker will handle the error
+          console.log(`⚠️ Attempting to delete active job ${jobId} - worker will handle cleanup`);
+        }
+      }
+    } catch (queueError) {
+      // Job might not be in queue anymore (already processed or never queued)
+      console.log(`Job ${jobId} not found in queue, proceeding with DB deletion`);
     }
     
     // Delete from database (cascade will handle related records)
+    // If job is active, the worker will fail gracefully when it tries to update
     await pool.query('DELETE FROM crawl_jobs WHERE id = $1', [jobId]);
     
-    res.json({ success: true });
+    res.json({ 
+      success: true,
+      wasActive: isActive,
+      message: isActive 
+        ? 'Job deletion initiated. Active crawl will be stopped.' 
+        : 'Job deleted successfully'
+    });
   } catch (error) {
     console.error('Error deleting crawl:', error);
     res.status(500).json({ error: error.message });

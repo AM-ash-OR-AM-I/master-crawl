@@ -41,6 +41,17 @@ const crawlWorker = new Worker(
     } = job.data;
 
     try {
+      // Check if job still exists before starting (might have been deleted)
+      const jobCheck = await queryWithRetry(
+        "SELECT id FROM crawl_jobs WHERE id = $1",
+        [jobId]
+      );
+      
+      if (jobCheck.rows.length === 0) {
+        console.log(`Job ${jobId} was deleted, skipping crawl`);
+        return { success: false, message: "Job was deleted" };
+      }
+
       // Update status to CRAWLING
       await queryWithRetry(
         "UPDATE crawl_jobs SET status = $1, started_at = NOW() WHERE id = $2",
@@ -86,6 +97,17 @@ const crawlWorker = new Worker(
             `   📍 Used sitemap.xml (discovered ${crawlStats.sitemapUrlsDiscovered} URLs)`
           );
         }
+      }
+
+      // Check if job still exists before processing (might have been deleted)
+      const jobCheckBeforeProcessing = await queryWithRetry(
+        "SELECT id FROM crawl_jobs WHERE id = $1",
+        [jobId]
+      );
+      
+      if (jobCheckBeforeProcessing.rows.length === 0) {
+        console.log(`Job ${jobId} was deleted during crawl, stopping processing`);
+        return { success: false, message: "Job was deleted during crawl" };
       }
 
       // Update status to PROCESSING
@@ -143,6 +165,17 @@ const crawlWorker = new Worker(
         errorSummary = `${failedCount} page(s) failed to crawl. ${crawlStats.successfulPages} pages crawled successfully.`;
       }
 
+      // Check if job still exists before completing (might have been deleted)
+      const jobCheckBeforeComplete = await queryWithRetry(
+        "SELECT id FROM crawl_jobs WHERE id = $1",
+        [jobId]
+      );
+      
+      if (jobCheckBeforeComplete.rows.length === 0) {
+        console.log(`Job ${jobId} was deleted before completion, skipping status update`);
+        return { success: false, message: "Job was deleted before completion" };
+      }
+
       // Update status to COMPLETED (AI improvement will be done manually via button)
       // Include error summary if there were partial failures
       if (errorSummary && !crawlErrors.criticalError) {
@@ -175,6 +208,17 @@ const crawlWorker = new Worker(
         errorMessage = `Timeout error: ${error.message}. The website may be too slow or unresponsive.`;
       } else if (error.message.includes("navigation")) {
         errorMessage = `Navigation error: ${error.message}. The website may have redirects or access restrictions.`;
+      }
+
+      // Check if job still exists before marking as failed (might have been deleted)
+      const jobCheckBeforeFail = await queryWithRetry(
+        "SELECT id FROM crawl_jobs WHERE id = $1",
+        [jobId]
+      );
+      
+      if (jobCheckBeforeFail.rows.length === 0) {
+        console.log(`Job ${jobId} was deleted before marking as failed, skipping status update`);
+        return; // Job was deleted, no need to update status
       }
 
       // Update status to FAILED
