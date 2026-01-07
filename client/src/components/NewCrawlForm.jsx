@@ -7,6 +7,7 @@ function NewCrawlForm({ onSubmit }) {
   const [websites, setWebsites] = useState(['']);
   const [maxDepth, setMaxDepth] = useState(3);
   const [maxPages, setMaxPages] = useState(500);
+  const [useSitemap, setUseSitemap] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(false);
@@ -42,7 +43,7 @@ function NewCrawlForm({ onSubmit }) {
 
     setLoading(true);
     try {
-      await onSubmit(validWebsites, maxDepth, maxPages);
+      await onSubmit(validWebsites, maxDepth, maxPages, useSitemap);
       setSuccess(true);
       setWebsites(['']);
       setTimeout(() => setSuccess(false), 3000);
@@ -180,6 +181,30 @@ function NewCrawlForm({ onSubmit }) {
                     disabled={loading}
                     className="w-full"
                   />
+                </div>
+                
+                <div className="pt-2">
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <div className="relative">
+                      <input
+                        type="checkbox"
+                        checked={useSitemap}
+                        onChange={(e) => setUseSitemap(e.target.checked)}
+                        disabled={loading}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-muted rounded-full peer peer-checked:bg-primary transition-colors"></div>
+                      <div className="absolute left-1 top-1 w-4 h-4 bg-background rounded-full shadow peer-checked:translate-x-5 transition-transform"></div>
+                    </div>
+                    <div>
+                      <span className="text-sm font-medium">Use sitemap.xml</span>
+                      <p className="text-xs text-muted-foreground">
+                        {useSitemap 
+                          ? "Faster crawling using sitemap.xml (may show flat hierarchy)" 
+                          : "Pure link crawling (accurate depth hierarchy)"}
+                      </p>
+                    </div>
+                  </label>
                 </div>
               </div>
             )}

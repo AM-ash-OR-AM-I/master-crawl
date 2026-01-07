@@ -13,7 +13,7 @@ const router = express.Router();
  */
 router.post('/', async (req, res) => {
   try {
-    const { websites, maxDepth = 3, maxPages = 500 } = req.body;
+    const { websites, maxDepth = 3, maxPages = 500, useSitemap = false } = req.body;
     
     if (!websites || !Array.isArray(websites) || websites.length === 0) {
       return res.status(400).json({ error: 'websites array is required' });
@@ -37,6 +37,7 @@ router.post('/', async (req, res) => {
         domain: website,
         maxDepth,
         maxPages,
+        useSitemap,
       }, {
         jobId,
         attempts: 3,

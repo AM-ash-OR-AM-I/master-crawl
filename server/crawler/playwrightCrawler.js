@@ -1693,6 +1693,7 @@ async function crawlWebsite({
   domain,
   maxDepth = 3,
   maxPages = 500,
+  useSitemap = false,
   onProgress,
 }) {
   const baseUrl = domain.startsWith("http") ? domain : `https://${domain}`;
@@ -1736,14 +1737,133 @@ async function crawlWebsite({
     }
   }
 
-  // DISABLED: sitemap.xml usage - use pure crawling for accurate depth tracking
-  // The sitemap.xml approach sets all pages to depth=1 which breaks the tree structure
-  // Pure crawling builds proper parent-child relationships based on link discovery
-  console.log(`🔗 Using pure crawling (sitemap.xml discovery disabled)`);
-
-  // Track sitemap-discovered URLs (disabled)
+  // Track sitemap-discovered URLs
   const sitemapPages = [];
-  const sitemapResult = { found: false, urls: [], errors: [] };
+  let sitemapResult = { found: false, urls: [], errors: [] };
+
+  // Conditionally use sitemap.xml based on user preference
+  if (useSitemap) {
+    console.log(`📍 Checking for sitemap.xml...`);
+    sitemapResult = await fetchSitemap(baseUrl, robots);
+
+    if (sitemapResult.found) {
+      crawlErrors.stats.sitemapUrlsDiscovered = sitemapResult.urls.length;
+
+      // Filter to same domain only
+      const sameDomainUrls = sitemapResult.urls.filter((url) => {
+        try {
+          return sameDomain(url, baseUrl);
+        } catch {
+          return false;
+        }
+      });
+
+      console.log(
+        `📄 Found ${sameDomainUrls.length} same-domain URLs from sitemap`
+      );
+
+      // SMART SITEMAP HANDLING:
+      // - If sitemap has many URLs, store them directly without browser crawling
+      // - Only browser-crawl a sample for content extraction
+      // - Respect maxPages limit
+
+      const SITEMAP_DIRECT_THRESHOLD = 100; // If more than this, store directly
+      const BROWSER_CRAWL_SAMPLE = Math.min(50, maxPages); // How many to actually browser-crawl
+
+      if (sameDomainUrls.length > SITEMAP_DIRECT_THRESHOLD) {
+        console.log(
+          `📊 Large sitemap detected (${sameDomainUrls.length} URLs). Storing URLs directly, browser-crawling sample of ${BROWSER_CRAWL_SAMPLE}`
+        );
+
+        // Limit total URLs to maxPages
+        const urlsToStore = sameDomainUrls.slice(0, maxPages);
+
+        // Store sitemap URLs directly (they're already discovered, no need to crawl)
+        for (const sitemapUrl of urlsToStore) {
+          const normalizedUrl = normalizeUrl(
+            sitemapUrl,
+            sitemapUrl.includes("#/")
+          );
+          if (normalizedUrl && !visited.has(normalizedUrl)) {
+            visited.add(normalizedUrl);
+
+            // Generate title from URL
+            let title = "Page";
+            try {
+              const urlObj = new URL(normalizedUrl);
+              const pathParts = urlObj.pathname.split("/").filter((p) => p);
+              if (pathParts.length > 0) {
+                title = pathParts[pathParts.length - 1]
+                  .replace(/-/g, " ")
+                  .replace(/_/g, " ")
+                  .replace(/\b\w/g, (l) => l.toUpperCase());
+              } else {
+                title = "Home";
+              }
+            } catch {}
+
+            sitemapPages.push({
+              url: normalizedUrl,
+              depth: 1,
+              parentUrl: baseUrl,
+              title: title,
+              fromSitemap: true,
+            });
+          }
+        }
+
+        console.log(
+          `   ✅ Stored ${sitemapPages.length} URLs from sitemap directly`
+        );
+
+        // Add only a sample to the browser crawl queue for content extraction
+        // Prioritize: homepage, then spread across different path prefixes
+        const sampleUrls = selectSampleUrls(sameDomainUrls, BROWSER_CRAWL_SAMPLE);
+
+        for (const sitemapUrl of sampleUrls) {
+          const normalizedUrl = normalizeUrl(
+            sitemapUrl,
+            sitemapUrl.includes("#/")
+          );
+          if (normalizedUrl) {
+            queue.push({
+              url: normalizedUrl,
+              depth: 1,
+              parentUrl: baseUrl,
+              fromSitemap: true,
+              sampleCrawl: true, // Mark as sample crawl for content extraction
+            });
+          }
+        }
+
+        console.log(
+          `   🔍 Added ${sampleUrls.length} URLs to browser crawl queue for content extraction`
+        );
+      } else {
+        // Small sitemap - add all to crawl queue as before
+        console.log(
+          `📄 Adding ${sameDomainUrls.length} URLs from sitemap to crawl queue`
+        );
+
+        for (const sitemapUrl of sameDomainUrls) {
+          const normalizedUrl = normalizeUrl(
+            sitemapUrl,
+            sitemapUrl.includes("#/")
+          );
+          if (normalizedUrl && !visited.has(normalizedUrl)) {
+            queue.push({
+              url: normalizedUrl,
+              depth: 1,
+              parentUrl: baseUrl,
+              fromSitemap: true,
+            });
+          }
+        }
+      }
+    }
+  } else {
+    console.log(`🔗 Using pure crawling (sitemap.xml discovery disabled)`);
+  }
 
   // Record sitemap errors if any
   if (sitemapResult.errors && sitemapResult.errors.length > 0) {
