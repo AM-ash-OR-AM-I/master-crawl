@@ -15,7 +15,8 @@ const SPA_WAIT_TIMEOUT = 5000; // Max wait for SPA content
 const PAGE_NAVIGATION_TIMEOUT = 30000; // Increased timeout
 
 /**
- * Normalize URL - preserve hash for SPAs and fragments, remove query params, trailing slash
+ * Normalize URL - preserve hash for SPAs and fragments, remove query params
+ * NOTE: We preserve trailing slashes as some servers require them (return 404 without)
  */
 function normalizeUrl(url, preserveHash = false) {
   try {
@@ -34,10 +35,40 @@ function normalizeUrl(url, preserveHash = false) {
       }
     }
     u.search = "";
-    return u.href.replace(/\/$/, "");
+    // Preserve trailing slash - some servers require it (e.g., return 404 without it)
+    return u.href;
   } catch {
     return null;
   }
+}
+
+/**
+ * Get canonical URL for deduplication (without trailing slash)
+ * Used only for checking if we've already visited a URL
+ */
+function getCanonicalUrl(url) {
+  if (!url) return null;
+  return url.replace(/\/$/, "");
+}
+
+/**
+ * Check if URL has been visited (handles both with/without trailing slash)
+ */
+function hasVisited(visited, url) {
+  if (!url) return true;
+  const canonical = getCanonicalUrl(url);
+  return (
+    visited.has(url) || visited.has(canonical) || visited.has(canonical + "/")
+  );
+}
+
+/**
+ * Mark URL as visited (stores canonical form)
+ */
+function markVisited(visited, url) {
+  if (!url) return;
+  // Store the canonical form (without trailing slash) for consistent deduplication
+  visited.add(getCanonicalUrl(url));
 }
 
 /**
@@ -1784,8 +1815,8 @@ async function crawlWebsite({
             sitemapUrl,
             sitemapUrl.includes("#/")
           );
-          if (normalizedUrl && !visited.has(normalizedUrl)) {
-            visited.add(normalizedUrl);
+          if (normalizedUrl && !hasVisited(visited, normalizedUrl)) {
+            markVisited(visited, normalizedUrl);
 
             // Generate title from URL
             let title = "Page";
@@ -1818,7 +1849,10 @@ async function crawlWebsite({
 
         // Add only a sample to the browser crawl queue for content extraction
         // Prioritize: homepage, then spread across different path prefixes
-        const sampleUrls = selectSampleUrls(sameDomainUrls, BROWSER_CRAWL_SAMPLE);
+        const sampleUrls = selectSampleUrls(
+          sameDomainUrls,
+          BROWSER_CRAWL_SAMPLE
+        );
 
         for (const sitemapUrl of sampleUrls) {
           const normalizedUrl = normalizeUrl(
@@ -1850,7 +1884,7 @@ async function crawlWebsite({
             sitemapUrl,
             sitemapUrl.includes("#/")
           );
-          if (normalizedUrl && !visited.has(normalizedUrl)) {
+          if (normalizedUrl && !hasVisited(visited, normalizedUrl)) {
             queue.push({
               url: normalizedUrl,
               depth: 1,
@@ -2026,7 +2060,7 @@ async function crawlWebsite({
             const url = normalizeUrl(item.url, hasHashRoute);
 
             // Skip if already visited, invalid, or exceeds depth
-            if (!url || visited.has(url) || item.depth > maxDepth) {
+            if (!url || hasVisited(visited, url) || item.depth > maxDepth) {
               return { success: true, skipped: true };
             }
 
@@ -2044,7 +2078,7 @@ async function crawlWebsite({
               return { success: true, skipped: true };
             }
 
-            visited.add(url);
+            markVisited(visited, url);
             console.log(`✔ [${item.depth}] ${url}`);
 
             // Add delay between requests - respect robots.txt crawl-delay or use deterministic delay
@@ -2211,7 +2245,7 @@ async function crawlWebsite({
 
                   if (
                     normalizedLink &&
-                    !visited.has(normalizedLink) &&
+                    !hasVisited(visited, normalizedLink) &&
                     sameDomain(normalizedLink, baseUrl) &&
                     item.depth < maxDepth &&
                     linkUrl.protocol.startsWith("http") // Only HTTP/HTTPS
