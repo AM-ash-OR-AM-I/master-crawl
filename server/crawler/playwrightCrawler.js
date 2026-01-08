@@ -1264,25 +1264,9 @@ async function extractPageDataWithoutEval(page, url) {
       }
     } catch {}
 
-    // Extract hash fragments
-    const fragmentLinks = [];
-    try {
-      const fragmentElements = await page.locator('a[href^="#"]').all();
-      for (const fragEl of fragmentElements) {
-        try {
-          const href = await fragEl.getAttribute("href");
-          if (href && href !== "#" && !href.startsWith("#/")) {
-            try {
-              const urlObj = new URL(url);
-              urlObj.hash = href;
-              fragmentLinks.push(urlObj.href);
-            } catch {}
-          }
-        } catch {}
-      }
-    } catch {}
-
-    const allLinks = [...new Set([...links, ...fragmentLinks])];
+    // Hash fragments are NOT extracted - they're just anchors on the same page
+    // Only hash routes (#/route) are treated as separate pages
+    const allLinks = [...new Set(links)];
 
     // Extract original hrefs map (we stored them in linkTitles above, need to separate)
     // Actually, we need to track original hrefs separately
@@ -1633,11 +1617,9 @@ async function crawlPageInternal(
       new Promise((resolve) => setTimeout(() => resolve([]), 5000)),
     ]).catch(() => []);
 
-    // Capture page fragments/sections (with timeout)
-    const fragmentLinks = await Promise.race([
-      capturePageFragments(page, url),
-      new Promise((resolve) => setTimeout(() => resolve([]), 3000)),
-    ]).catch(() => []);
+    // Hash fragments are NOT captured - they're just anchors on the same page, not separate pages
+    // Only hash routes (#/route) are treated as separate pages
+    const fragmentLinks = [];
 
     // Handle pagination if present (with timeout)
     const paginatedLinks = await Promise.race([
@@ -1976,8 +1958,9 @@ async function crawlPageInternal(
                   originalHref: href, // Store original href attribute as-is
                 };
               } catch {
-                // Fallback for hash links
-                if (href.startsWith("#")) {
+                // Fallback for hash links - only include hash routes (#/route), not fragments (#section)
+                if (href.startsWith("#/")) {
+                  // This is a hash route (SPA routing) - treat as separate page
                   const url =
                     window.location.origin + window.location.pathname + href;
                   return {
@@ -1986,6 +1969,7 @@ async function crawlPageInternal(
                     originalHref: href, // Store original href attribute as-is
                   };
                 }
+                // Skip hash fragments (#section) - they're just anchors on the same page
                 // Last resort: try relative to origin (shouldn't normally happen)
                 try {
                   const url = new URL(href, window.location.origin).href;
@@ -2001,26 +1985,9 @@ async function crawlPageInternal(
             })
             .filter(Boolean);
 
-          // Include hash fragments that are page sections (not routes)
-          const fragmentLinks = Array.from(
-            document.querySelectorAll('a[href^="#"]')
-          )
-            .map((a) => {
-              const href = a.getAttribute("href");
-              if (href && href !== "#" && !href.startsWith("#/")) {
-                try {
-                  return (
-                    window.location.origin + window.location.pathname + href
-                  );
-                } catch {
-                  return null;
-                }
-              }
-              return null;
-            })
-            .filter(Boolean);
-
           // Combine all links - extract URLs and store titles in a map
+          // Note: Hash fragments (#section) are NOT included - they're just anchors on the same page
+          // Only hash routes (#/route) are treated as separate pages
           const linkUrls = [];
           const linkTitlesMap = new Map();
           // Note: This Map is in browser context (page.evaluate), separate from Node.js originalHrefMap
@@ -2061,11 +2028,6 @@ async function crawlPageInternal(
                 }
               }
             }
-          });
-
-          // Process fragment links (they're just URLs)
-          fragmentLinks.forEach((url) => {
-            linkUrls.push(url);
           });
 
           const combinedLinks = [...new Set(linkUrls)];
@@ -2165,12 +2127,13 @@ async function crawlPageInternal(
         links = fallbackData.links || [];
       } else {
         // Extract all links for backward compatibility
-        // Combine regular links, dropdown links, paginated links, and fragment links
+        // Combine regular links, dropdown links, and paginated links
+        // Note: Fragment links are NOT included - hash fragments (#section) are just anchors on the same page
         const allExtractedLinks = [
           ...(pageData.links || []),
           ...dropdownLinks,
           ...paginatedLinks,
-          ...fragmentLinks.map((f) => f.url).filter(Boolean),
+          // Fragment links removed - they're not separate pages
         ];
         // Sort links deterministically to ensure consistent discovery order
         links = [...new Set(allExtractedLinks)].sort((a, b) =>
@@ -2350,6 +2313,8 @@ async function crawlWebsite({
   // Map to track error URLs (base URL -> error info)
   // Used to skip hash fragment URLs when base URL is already known to be broken
   const errorUrlMap = new Map(); // baseUrl -> { title: 'ERROR: ...', statusCode: 404 }
+  // Track URLs currently being crawled to handle race conditions with anchor links
+  const inFlightUrls = new Set(); // URLs currently being crawled
 
   // Error tracking for comprehensive reporting
   const crawlErrors = {
@@ -2739,74 +2704,24 @@ async function crawlWebsite({
               return { success: true, skipped: true };
             }
 
-            // Check if this is a hash fragment URL (not a #/ route)
-            // If the base URL (without hash) was already visited and marked as an error,
-            // skip crawling and mark this hash fragment URL as the same error
+            // Normalize hash fragments to base URL (hash fragments are just anchors on the same page)
+            // Only hash routes (#/route) are treated as separate pages
             const baseUrl = getBaseUrl(url);
             if (baseUrl !== url) {
               // This URL has a hash fragment (and it's not a #/ route)
-              let baseError = errorUrlMap.get(baseUrl);
-
-              // If not in memory map, check database for existing error
-              if (!baseError) {
-                try {
-                  const dbResult = await queryWithRetry(
-                    "SELECT title, status_code FROM pages WHERE job_id = $1 AND url = $2 AND (title LIKE 'ERROR:%' OR status_code >= 400)",
-                    [jobId, baseUrl]
-                  );
-                  if (dbResult.rows.length > 0) {
-                    baseError = {
-                      title: dbResult.rows[0].title,
-                      statusCode: dbResult.rows[0].status_code || 0,
-                    };
-                    // Cache in memory map for future checks
-                    errorUrlMap.set(baseUrl, baseError);
-                  }
-                } catch (dbCheckError) {
-                  // Ignore database check errors, continue with crawl
-                }
-              }
-
-              if (baseError) {
-                // Base URL was already marked as an error - hash fragment URL will also fail
-                console.log(
-                  `⚠️  Skipping ${url} - base URL ${baseUrl} already marked as: ${baseError.title}`
-                );
-
-                // Mark as visited to prevent retry
-                markVisited(visited, url);
-
-                // Store as error in database
-                try {
-                  const jobStillExists = await jobExists(jobId);
-                  if (jobStillExists) {
-                    const pageOriginalHref = item.originalHref || null;
-                    await queryWithRetry(
-                      "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code, original_href) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (job_id, url) DO NOTHING",
-                      [
-                        jobId,
-                        url,
-                        item.depth,
-                        item.parentUrl,
-                        baseError.title,
-                        baseError.statusCode,
-                        pageOriginalHref,
-                      ]
-                    );
-                  }
-                } catch (dbError) {
-                  console.warn(
-                    `Failed to store hash fragment error page: ${dbError.message}`
-                  );
-                }
-
-                crawlErrors.stats.skippedPages++;
+              // Hash fragments are the same page as the base URL, so skip if base URL already visited
+              if (hasVisited(visited, baseUrl)) {
+                // Base URL already crawled - hash fragment is the same page, skip it
+                markVisited(visited, url); // Mark fragment as visited too
                 return {
                   success: true,
                   skipped: true,
-                  reason: "base_url_error",
+                  reason: "hash_fragment_same_page",
                 };
               }
+              // Base URL not visited yet - normalize to base URL and continue
+              // (This handles edge cases where hash fragment URLs get into queue from sitemaps, etc.)
+              url = baseUrl;
             }
 
             // Check robots.txt compliance
@@ -2814,6 +2729,9 @@ async function crawlWebsite({
               console.log(`🚫 Blocked by robots.txt: ${url}`);
               return { success: true, skipped: true };
             }
+
+            // Mark URL as in-flight before crawling
+            inFlightUrls.add(url);
 
             markVisited(visited, url);
             console.log(`✔ [${item.depth}] ${url}`);
@@ -3069,13 +2987,21 @@ async function crawlWebsite({
                     continue; // Skip non-HTML files
                   }
 
-                  // Check if this is a hash route (#/) or hash fragment (#section)
+                  // Check if this is a hash route (#/) - hash fragments (#section) are skipped
                   const isHashRoute = link.includes("#/");
+                  // Hash fragments (like #section) are just anchors on the same page - skip them
                   const isHashFragment =
                     link.includes("#") &&
                     !link.includes("#/") &&
                     link.split("#")[1]?.length > 0;
-                  const preserveHash = isHashRoute || isHashFragment;
+
+                  // Skip hash fragments - they're the same page as the base URL
+                  if (isHashFragment) {
+                    continue;
+                  }
+
+                  // Only preserve hash for hash routes (#/route) - these are separate pages
+                  const preserveHash = isHashRoute;
                   const normalizedLink = normalizeUrl(link, preserveHash);
 
                   // Use sameSite check instead of sameDomain to handle subdomain redirects
@@ -3123,6 +3049,12 @@ async function crawlWebsite({
               await onProgress({ pagesCrawled: pages.length });
             }
 
+            // Remove from in-flight tracking
+            inFlightUrls.delete(url);
+            if (checkRedirectDuplicates && finalUrl && finalUrl !== url) {
+              inFlightUrls.delete(finalUrl);
+            }
+
             return { success: true };
           } catch (error) {
             // Handle errors within the async function
@@ -3167,6 +3099,20 @@ async function crawlWebsite({
                 );
               }
             }
+
+            // Remove from in-flight tracking (even on error)
+            inFlightUrls.delete(item.url);
+            const baseUrlForError = getBaseUrl(item.url);
+            if (baseUrlForError && baseUrlForError !== item.url) {
+              // Also track error for base URL to help with anchor link detection
+              if (!errorUrlMap.has(baseUrlForError)) {
+                errorUrlMap.set(baseUrlForError, {
+                  title: `ERROR: ${error.message}`,
+                  statusCode: 0,
+                });
+              }
+            }
+
             return { success: false, error: error.message, url: item.url };
           }
         })
