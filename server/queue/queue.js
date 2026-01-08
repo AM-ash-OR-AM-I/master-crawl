@@ -46,10 +46,26 @@ const crawlWorker = new Worker(
         "SELECT id FROM crawl_jobs WHERE id = $1",
         [jobId]
       );
-      
+
       if (jobCheck.rows.length === 0) {
         console.log(`Job ${jobId} was deleted, skipping crawl`);
         return { success: false, message: "Job was deleted" };
+      }
+
+      // Check if job still exists before updating status (might have been deleted)
+      const jobCheckBeforeCrawling = await queryWithRetry(
+        "SELECT id FROM crawl_jobs WHERE id = $1",
+        [jobId]
+      );
+
+      if (jobCheckBeforeCrawling.rows.length === 0) {
+        console.log(
+          `Job ${jobId} was deleted before crawling started, skipping`
+        );
+        return {
+          success: false,
+          message: "Job was deleted before crawl started",
+        };
       }
 
       // Update status to CRAWLING
@@ -68,6 +84,17 @@ const crawlWorker = new Worker(
         useSitemap,
         checkRedirectDuplicates: checkRedirectDuplicates,
         onProgress: async (progress) => {
+          // Check if job still exists before updating progress
+          const jobCheck = await queryWithRetry(
+            "SELECT id FROM crawl_jobs WHERE id = $1",
+            [jobId]
+          );
+
+          if (jobCheck.rows.length === 0) {
+            // Job was deleted, stop progress updates
+            return;
+          }
+
           await queryWithRetry(
             "UPDATE crawl_jobs SET pages_crawled = $1 WHERE id = $2",
             [progress.pagesCrawled, jobId]
@@ -104,9 +131,11 @@ const crawlWorker = new Worker(
         "SELECT id FROM crawl_jobs WHERE id = $1",
         [jobId]
       );
-      
+
       if (jobCheckBeforeProcessing.rows.length === 0) {
-        console.log(`Job ${jobId} was deleted during crawl, stopping processing`);
+        console.log(
+          `Job ${jobId} was deleted during crawl, stopping processing`
+        );
         return { success: false, message: "Job was deleted during crawl" };
       }
 
@@ -170,9 +199,11 @@ const crawlWorker = new Worker(
         "SELECT id FROM crawl_jobs WHERE id = $1",
         [jobId]
       );
-      
+
       if (jobCheckBeforeComplete.rows.length === 0) {
-        console.log(`Job ${jobId} was deleted before completion, skipping status update`);
+        console.log(
+          `Job ${jobId} was deleted before completion, skipping status update`
+        );
         return { success: false, message: "Job was deleted before completion" };
       }
 
@@ -215,9 +246,11 @@ const crawlWorker = new Worker(
         "SELECT id FROM crawl_jobs WHERE id = $1",
         [jobId]
       );
-      
+
       if (jobCheckBeforeFail.rows.length === 0) {
-        console.log(`Job ${jobId} was deleted before marking as failed, skipping status update`);
+        console.log(
+          `Job ${jobId} was deleted before marking as failed, skipping status update`
+        );
         return; // Job was deleted, no need to update status
       }
 

@@ -40,6 +40,17 @@ CREATE TABLE IF NOT EXISTS pages (
   UNIQUE(job_id, url)
 );
 
+-- Add original_href column if it doesn't exist (for existing databases)
+DO $$ 
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name = 'pages' AND column_name = 'original_href'
+  ) THEN
+    ALTER TABLE pages ADD COLUMN original_href TEXT;
+  END IF;
+END $$;
+
 -- AI recommendations table
 CREATE TABLE IF NOT EXISTS ai_recommendations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

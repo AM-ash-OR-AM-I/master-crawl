@@ -3,6 +3,24 @@ const robotsParser = require("robots-parser");
 const { URL } = require("url");
 const { pool, queryWithRetry } = require("../db/init");
 
+/**
+ * Check if a crawl job still exists in the database
+ * Returns true if job exists, false otherwise
+ */
+async function jobExists(jobId) {
+  try {
+    const result = await queryWithRetry(
+      "SELECT id FROM crawl_jobs WHERE id = $1",
+      [jobId]
+    );
+    return result.rows.length > 0;
+  } catch (error) {
+    // If query fails, assume job doesn't exist to be safe
+    console.warn(`Error checking job existence for ${jobId}:`, error.message);
+    return false;
+  }
+}
+
 // Browser is created fresh for each crawl job to ensure clean state
 // and proper resource cleanup
 
@@ -39,6 +57,27 @@ function normalizeUrl(url, preserveHash = false) {
     return u.href;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Get base URL without hash fragment (except #/ routes for SPAs)
+ * Used to check if parent page exists before crawling hash fragment URLs
+ */
+function getBaseUrl(url) {
+  if (!url) return null;
+  try {
+    const urlObj = new URL(url);
+    // Preserve hash routes (SPA routing like #/route)
+    if (urlObj.hash && urlObj.hash.startsWith("#/")) {
+      // Keep hash routes as-is - they're different pages
+      return urlObj.href;
+    }
+    // Remove hash fragments (like #section-name) - they're client-side only
+    urlObj.hash = "";
+    return urlObj.href;
+  } catch {
+    return url;
   }
 }
 
@@ -2308,6 +2347,9 @@ async function crawlWebsite({
   const linkTitleMap = new Map();
   // Map to store original href attributes for discovered URLs
   const originalHrefMap = new Map();
+  // Map to track error URLs (base URL -> error info)
+  // Used to skip hash fragment URLs when base URL is already known to be broken
+  const errorUrlMap = new Map(); // baseUrl -> { title: 'ERROR: ...', statusCode: 404 }
 
   // Error tracking for comprehensive reporting
   const crawlErrors = {
@@ -2488,27 +2530,45 @@ async function crawlWebsite({
       `💾 Storing ${sitemapPages.length} sitemap URLs in database...`
     );
     let storedCount = 0;
-    for (const page of sitemapPages) {
-      try {
-        const pageResult = await queryWithRetry(
-          "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
-          [jobId, page.url, page.depth, page.parentUrl, page.title, 200]
-        );
-        if (pageResult.rows.length > 0) {
-          pages.push({
-            id: pageResult.rows[0].id,
-            url: page.url,
-            depth: page.depth,
-            parentUrl: page.parentUrl,
-            title: page.title,
-            fromSitemap: true,
-          });
-          storedCount++;
-        }
-      } catch (dbError) {
-        // Ignore duplicate errors
-        if (!dbError.message.includes("duplicate")) {
-          console.warn(`   ⚠️ Error storing sitemap page: ${dbError.message}`);
+    // Check if job still exists before storing sitemap pages
+    const jobStillExists = await jobExists(jobId);
+    if (!jobStillExists) {
+      console.log(`⚠️ Job ${jobId} was deleted, skipping sitemap page storage`);
+    } else {
+      for (const page of sitemapPages) {
+        try {
+          // Double-check job exists before each insert
+          if (!(await jobExists(jobId))) {
+            console.log(
+              `⚠️ Job ${jobId} was deleted during sitemap storage, stopping`
+            );
+            break;
+          }
+          const pageResult = await queryWithRetry(
+            "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code, original_href) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
+            [jobId, page.url, page.depth, page.parentUrl, page.title, 200, null]
+          );
+          if (pageResult.rows.length > 0) {
+            pages.push({
+              id: pageResult.rows[0].id,
+              url: page.url,
+              depth: page.depth,
+              parentUrl: page.parentUrl,
+              title: page.title,
+              fromSitemap: true,
+            });
+            storedCount++;
+          }
+        } catch (dbError) {
+          // Ignore duplicate errors and foreign key violations (job might have been deleted)
+          if (
+            !dbError.message.includes("duplicate") &&
+            !dbError.message.includes("foreign key constraint")
+          ) {
+            console.warn(
+              `   ⚠️ Error storing sitemap page: ${dbError.message}`
+            );
+          }
         }
       }
     }
@@ -2679,6 +2739,76 @@ async function crawlWebsite({
               return { success: true, skipped: true };
             }
 
+            // Check if this is a hash fragment URL (not a #/ route)
+            // If the base URL (without hash) was already visited and marked as an error,
+            // skip crawling and mark this hash fragment URL as the same error
+            const baseUrl = getBaseUrl(url);
+            if (baseUrl !== url) {
+              // This URL has a hash fragment (and it's not a #/ route)
+              let baseError = errorUrlMap.get(baseUrl);
+
+              // If not in memory map, check database for existing error
+              if (!baseError) {
+                try {
+                  const dbResult = await queryWithRetry(
+                    "SELECT title, status_code FROM pages WHERE job_id = $1 AND url = $2 AND (title LIKE 'ERROR:%' OR status_code >= 400)",
+                    [jobId, baseUrl]
+                  );
+                  if (dbResult.rows.length > 0) {
+                    baseError = {
+                      title: dbResult.rows[0].title,
+                      statusCode: dbResult.rows[0].status_code || 0,
+                    };
+                    // Cache in memory map for future checks
+                    errorUrlMap.set(baseUrl, baseError);
+                  }
+                } catch (dbCheckError) {
+                  // Ignore database check errors, continue with crawl
+                }
+              }
+
+              if (baseError) {
+                // Base URL was already marked as an error - hash fragment URL will also fail
+                console.log(
+                  `⚠️  Skipping ${url} - base URL ${baseUrl} already marked as: ${baseError.title}`
+                );
+
+                // Mark as visited to prevent retry
+                markVisited(visited, url);
+
+                // Store as error in database
+                try {
+                  const jobStillExists = await jobExists(jobId);
+                  if (jobStillExists) {
+                    const pageOriginalHref = item.originalHref || null;
+                    await queryWithRetry(
+                      "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code, original_href) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (job_id, url) DO NOTHING",
+                      [
+                        jobId,
+                        url,
+                        item.depth,
+                        item.parentUrl,
+                        baseError.title,
+                        baseError.statusCode,
+                        pageOriginalHref,
+                      ]
+                    );
+                  }
+                } catch (dbError) {
+                  console.warn(
+                    `Failed to store hash fragment error page: ${dbError.message}`
+                  );
+                }
+
+                crawlErrors.stats.skippedPages++;
+                return {
+                  success: true,
+                  skipped: true,
+                  reason: "base_url_error",
+                };
+              }
+            }
+
             // Check robots.txt compliance
             if (robots && !robots.isAllowed(url, "*")) {
               console.log(`🚫 Blocked by robots.txt: ${url}`);
@@ -2749,6 +2879,16 @@ async function crawlWebsite({
                 depth: item.depth,
                 timestamp: new Date().toISOString(),
               });
+
+              // Store error in errorUrlMap for base URL (without hash fragment)
+              // This allows us to skip hash fragment URLs when base URL is already known to be broken
+              const baseUrlForError = getBaseUrl(url);
+              if (baseUrlForError && !errorUrlMap.has(baseUrlForError)) {
+                errorUrlMap.set(baseUrlForError, {
+                  title: `ERROR: ${error}`,
+                  statusCode: statusCode || 0,
+                });
+              }
             } else {
               crawlErrors.stats.successfulPages++;
             }
@@ -2795,13 +2935,30 @@ async function crawlWebsite({
             // Use final URL after redirects ONLY if redirect duplicate checking is enabled
             // Otherwise, use original URL (ignore redirects)
             try {
+              // Check if job still exists before inserting (might have been deleted)
+              const jobStillExists = await jobExists(jobId);
+              if (!jobStillExists) {
+                console.log(
+                  `⚠️ Job ${jobId} was deleted, skipping page insertion for ${url}`
+                );
+                return { success: true, skipped: true, reason: "job_deleted" };
+              }
+
               const finalStatusCode = error ? statusCode || 0 : statusCode;
               const finalTitle = error ? `ERROR: ${error}` : cleanedTitle;
               const urlToStore = checkRedirectDuplicates ? actualUrl : url;
 
+              // Get original href for this page if available (before inserting)
+              const pageOriginalHref =
+                item.originalHref ||
+                originalHrefMap.get(urlToStore) ||
+                originalHrefMap.get(getCanonicalUrl(urlToStore)) ||
+                originalHrefMap.get(getCanonicalUrl(urlToStore) + "/") ||
+                null;
+
               // Use ON CONFLICT to handle cases where redirect leads to already-crawled URL
               const pageResult = await queryWithRetry(
-                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
+                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code, original_href) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
                 [
                   jobId,
                   urlToStore, // Store final URL if redirect checking enabled, otherwise original URL
@@ -2809,19 +2966,12 @@ async function crawlWebsite({
                   item.parentUrl,
                   finalTitle,
                   finalStatusCode,
+                  pageOriginalHref,
                 ]
               );
 
               // Only add to pages array if insert was successful (not a duplicate)
               if (pageResult.rows.length > 0) {
-                // Get original href for this page if available
-                const pageOriginalHref =
-                  item.originalHref ||
-                  originalHrefMap.get(urlToStore) ||
-                  originalHrefMap.get(getCanonicalUrl(urlToStore)) ||
-                  originalHrefMap.get(getCanonicalUrl(urlToStore) + "/") ||
-                  null;
-
                 // Store original href in pageData if available
                 const enhancedPageData = pageData
                   ? {
@@ -2990,19 +3140,32 @@ async function crawlWebsite({
 
             console.warn(`⚠️ Error crawling ${item.url}:`, error.message);
             try {
-              await queryWithRetry(
-                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (job_id, url) DO NOTHING",
-                [
-                  jobId,
-                  item.url,
-                  item.depth,
-                  item.parentUrl,
-                  `ERROR: ${error.message}`,
-                  0,
-                ]
-              );
+              // Check if job still exists before inserting error page
+              const jobStillExists = await jobExists(jobId);
+              if (jobStillExists) {
+                // Get original href for error page if available
+                const errorOriginalHref = item.originalHref || null;
+                await queryWithRetry(
+                  "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code, original_href) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (job_id, url) DO NOTHING",
+                  [
+                    jobId,
+                    item.url,
+                    item.depth,
+                    item.parentUrl,
+                    `ERROR: ${error.message}`,
+                    0,
+                    errorOriginalHref,
+                  ]
+                );
+              }
             } catch (dbError) {
-              // Ignore database errors (including duplicates)
+              // Ignore database errors (including duplicates and foreign key violations)
+              if (!dbError.message.includes("foreign key constraint")) {
+                console.warn(
+                  `Database error storing failed page:`,
+                  dbError.message
+                );
+              }
             }
             return { success: false, error: error.message, url: item.url };
           }

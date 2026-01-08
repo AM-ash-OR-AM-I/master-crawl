@@ -179,16 +179,25 @@ router.delete('/:jobId', async (req, res) => {
     const isActive = ['PENDING', 'CRAWLING', 'PROCESSING', 'AI_ANALYSIS'].includes(jobStatus);
     
     // Try to remove from queue (works for pending jobs)
+    let queueRemoved = false;
     try {
       const queueJob = await crawlQueue.getJob(jobId);
       if (queueJob) {
         const state = await queueJob.getState();
         if (state === 'waiting' || state === 'delayed') {
           await queueJob.remove();
+          queueRemoved = true;
+          console.log(`✅ Removed job ${jobId} from queue (state: ${state})`);
         } else if (state === 'active') {
-          // Job is actively being processed - we can't cancel it cleanly
-          // But we'll still delete from DB, and the worker will handle the error
-          console.log(`⚠️ Attempting to delete active job ${jobId} - worker will handle cleanup`);
+          // Job is actively being processed - try to mark it for cancellation
+          // The crawler will check job existence and stop gracefully
+          console.log(`⚠️ Job ${jobId} is active - will delete from DB, crawler will stop on next check`);
+          // Note: BullMQ doesn't support cancelling active jobs directly
+          // The crawler will detect the deletion and stop gracefully
+        } else if (state === 'completed' || state === 'failed') {
+          // Job already finished, just remove from queue
+          await queueJob.remove();
+          queueRemoved = true;
         }
       }
     } catch (queueError) {
@@ -197,8 +206,9 @@ router.delete('/:jobId', async (req, res) => {
     }
     
     // Delete from database (cascade will handle related records)
-    // If job is active, the worker will fail gracefully when it tries to update
+    // The crawler checks job existence periodically and will stop gracefully
     await pool.query('DELETE FROM crawl_jobs WHERE id = $1', [jobId]);
+    console.log(`✅ Deleted job ${jobId} from database`);
     
     res.json({ 
       success: true,
