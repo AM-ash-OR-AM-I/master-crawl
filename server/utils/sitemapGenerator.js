@@ -488,6 +488,99 @@ function generateExcelSitemap(pages, baseUrl) {
     XLSX.utils.book_append_sheet(workbook, brokenLinksSheet, 'Broken Links');
   }
   
+  // Sheet 3: Sitemap URLs (uses URLs instead of titles)
+  // Build ancestor URLs map for each page
+  const buildAncestorUrls = (page) => {
+    const ancestorUrls = [];
+    let currentUrl = page.parentUrl;
+    const visited = new Set();
+    
+    while (currentUrl && ancestorUrls.length < page.depth && !visited.has(currentUrl)) {
+      visited.add(currentUrl);
+      const parentPage = pageMap.get(currentUrl);
+      if (parentPage) {
+        ancestorUrls.unshift(parentPage.url);
+        currentUrl = parentPage.parentUrl;
+      } else {
+        break;
+      }
+    }
+    
+    return ancestorUrls;
+  };
+  
+  // Convert URL to relative or keep absolute based on baseUrl
+  const getUrlDisplay = (url) => {
+    try {
+      const urlObj = new URL(url);
+      const baseUrlObj = new URL(baseUrl);
+      
+      // If same origin, return relative path
+      if (urlObj.origin === baseUrlObj.origin) {
+        return urlObj.pathname + urlObj.search + urlObj.hash;
+      }
+      // Otherwise return full URL
+      return url;
+    } catch {
+      return url;
+    }
+  };
+  
+  const sitemapUrlsRows = orderedPages.map(({ page, ancestorTitles }) => {
+    const depth = page.depth || 0;
+    const ancestorUrls = buildAncestorUrls(page);
+    
+    const row = {
+      'Top Level Navigation Landing Page (1st level)': '',
+      '2nd Level Subpage': '',
+      '3rd Level Subpage': '',
+      '4th Level Subpage': '',
+      '5th Level Subpage': '',
+      '6th Level Subpage': '',
+      '7th Level Subpage': '',
+      'URL': page.url,
+      'Notes': ''
+    };
+    
+    // Fill in ancestor URLs
+    ancestorUrls.forEach((ancestorUrl, idx) => {
+      const displayUrl = getUrlDisplay(ancestorUrl);
+      if (idx === 0) row['Top Level Navigation Landing Page (1st level)'] = displayUrl;
+      else if (idx === 1) row['2nd Level Subpage'] = displayUrl;
+      else if (idx === 2) row['3rd Level Subpage'] = displayUrl;
+      else if (idx === 3) row['4th Level Subpage'] = displayUrl;
+      else if (idx === 4) row['5th Level Subpage'] = displayUrl;
+      else if (idx === 5) row['6th Level Subpage'] = displayUrl;
+      else if (idx >= 6) row['7th Level Subpage'] = displayUrl;
+    });
+    
+    // Place current page URL at its depth level
+    const currentDisplayUrl = getUrlDisplay(page.url);
+    if (depth === 0) row['Top Level Navigation Landing Page (1st level)'] = currentDisplayUrl;
+    else if (depth === 1) row['2nd Level Subpage'] = currentDisplayUrl;
+    else if (depth === 2) row['3rd Level Subpage'] = currentDisplayUrl;
+    else if (depth === 3) row['4th Level Subpage'] = currentDisplayUrl;
+    else if (depth === 4) row['5th Level Subpage'] = currentDisplayUrl;
+    else if (depth === 5) row['6th Level Subpage'] = currentDisplayUrl;
+    else if (depth >= 6) row['7th Level Subpage'] = currentDisplayUrl;
+    
+    return row;
+  });
+  
+  const sitemapUrlsSheet = XLSX.utils.json_to_sheet(sitemapUrlsRows);
+  sitemapUrlsSheet['!cols'] = [
+    { wch: 45 }, // 1st level
+    { wch: 40 }, // 2nd level
+    { wch: 40 }, // 3rd level
+    { wch: 40 }, // 4th level
+    { wch: 40 }, // 5th level
+    { wch: 40 }, // 6th level
+    { wch: 40 }, // 7th level
+    { wch: 60 }, // URL
+    { wch: 30 }  // Notes
+  ];
+  XLSX.utils.book_append_sheet(workbook, sitemapUrlsSheet, 'Sitemap URLs');
+  
   // Generate Excel file buffer
   const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
   

@@ -1283,12 +1283,24 @@ async function extractPageDataWithoutEval(page, url) {
 /**
  * Crawl a single page with retry logic and overall timeout protection
  */
-async function crawlPage(context, url, retryCount = 0, linkTitleMap = null) {
+async function crawlPage(
+  context,
+  url,
+  retryCount = 0,
+  linkTitleMap = null,
+  checkRedirectDuplicates = false
+) {
   const PAGE_CRAWL_TIMEOUT = 60000; // 60 seconds max per page
 
   // Wrap entire crawl in timeout
   return Promise.race([
-    crawlPageInternal(context, url, retryCount, linkTitleMap),
+    crawlPageInternal(
+      context,
+      url,
+      retryCount,
+      linkTitleMap,
+      checkRedirectDuplicates
+    ),
     new Promise((_, reject) => {
       setTimeout(() => {
         reject(
@@ -1317,7 +1329,8 @@ async function crawlPageInternal(
   context,
   url,
   retryCount = 0,
-  linkTitleMap = null
+  linkTitleMap = null,
+  checkRedirectDuplicates = false
 ) {
   const page = await context.newPage();
 
@@ -1370,6 +1383,9 @@ async function crawlPageInternal(
 
     let finalUrl = url; // Track final URL after redirects
 
+    // If redirect duplicate checking is disabled, don't follow redirects at all
+    // Playwright doesn't have maxRedirects option, so we'll handle redirects manually
+
     for (const strategy of strategies) {
       try {
         response = await page.goto(url, strategy);
@@ -1379,9 +1395,18 @@ async function crawlPageInternal(
         if (response) {
           statusCode = response.status();
 
-          // Capture final URL after redirects
+          // Check if a redirect occurred (Playwright automatically follows redirects)
           const responseUrl = response.url();
-          if (responseUrl && responseUrl !== url) {
+          const redirectOccurred = responseUrl && responseUrl !== url;
+
+          // If redirect duplicate checking is disabled and a redirect occurred, ignore it
+          // Use original URL instead of following redirects
+          if (!checkRedirectDuplicates && redirectOccurred) {
+            // Don't follow redirects - use original URL
+            finalUrl = url;
+            // Don't log redirects when toggle is off
+          } else if (checkRedirectDuplicates && redirectOccurred) {
+            // Only capture and log redirects if redirect duplicate checking is enabled
             finalUrl = responseUrl;
             // Check if redirect is to a different domain
             if (!sameDomain(url, finalUrl)) {
@@ -1419,33 +1444,36 @@ async function crawlPageInternal(
       throw new Error("Navigation failed with all strategies");
     }
 
-    // Get final URL from page (handles both HTTP redirects and JavaScript redirects)
-    // This is more reliable than just response.url() as it captures the actual current URL
-    try {
-      const pageUrl = page.url();
-      if (pageUrl && pageUrl !== url) {
-        finalUrl = pageUrl;
-        // Check if redirect is to a different domain
-        if (!sameDomain(url, finalUrl)) {
-          // Check if it's still part of the same site (e.g., www.doordash.com -> about.doordash.com)
-          if (sameSite(url, finalUrl)) {
-            console.log(
-              `↪️ Cross-domain redirect (same site): ${url} -> ${finalUrl}`
-            );
+    // Get final URL from page (only if redirect duplicate checking is enabled)
+    // When disabled, we always use the original URL (don't follow redirects)
+    if (checkRedirectDuplicates) {
+      try {
+        const pageUrl = page.url();
+        if (pageUrl && pageUrl !== url) {
+          finalUrl = pageUrl;
+          // Check if redirect is to a different domain
+          if (!sameDomain(url, finalUrl)) {
+            // Check if it's still part of the same site (e.g., www.doordash.com -> about.doordash.com)
+            if (sameSite(url, finalUrl)) {
+              console.log(
+                `↪️ Cross-domain redirect (same site): ${url} -> ${finalUrl}`
+              );
+            } else {
+              console.log(
+                `↪️ Cross-domain redirect (different site): ${url} -> ${finalUrl}`
+              );
+              // For different sites, we'll still crawl but note the redirect
+            }
           } else {
-            console.log(
-              `↪️ Cross-domain redirect (different site): ${url} -> ${finalUrl}`
-            );
-            // For different sites, we'll still crawl but note the redirect
+            console.log(`↪️ Redirect: ${url} -> ${finalUrl}`);
           }
-        } else {
-          console.log(`↪️ Redirect: ${url} -> ${finalUrl}`);
         }
+      } catch {
+        // If we can't get page URL, use response URL or original URL
+        // finalUrl is already set from response.url() above
       }
-    } catch {
-      // If we can't get page URL, use response URL or original URL
-      // finalUrl is already set from response.url() above
     }
+    // When redirect duplicate checking is disabled, finalUrl is already set to url above
 
     // Check if this is a hash route (SPA route)
     const isHashRoute = finalUrl.includes("#/");
@@ -2224,7 +2252,13 @@ async function crawlPageInternal(
         );
         await page.close();
         await new Promise((resolve) => setTimeout(resolve, delay));
-        return crawlPage(context, url, retryCount + 1, linkTitleMap);
+        return crawlPage(
+          context,
+          url,
+          retryCount + 1,
+          linkTitleMap,
+          checkRedirectDuplicates
+        );
       }
 
       console.warn(
@@ -2681,7 +2715,13 @@ async function crawlWebsite({
               pageData,
               finalUrl,
               originalUrl,
-            } = await crawlPage(context, url, 0, linkTitleMap);
+            } = await crawlPage(
+              context,
+              url,
+              0,
+              linkTitleMap,
+              checkRedirectDuplicates
+            );
 
             // Use final URL after redirects ONLY if redirect duplicate checking is enabled
             // Otherwise, ignore redirects and use original URL (default behavior)
