@@ -1288,7 +1288,8 @@ async function crawlPage(
   url,
   retryCount = 0,
   linkTitleMap = null,
-  checkRedirectDuplicates = false
+  checkRedirectDuplicates = false,
+  originalHrefMap = null
 ) {
   const PAGE_CRAWL_TIMEOUT = 60000; // 60 seconds max per page
 
@@ -1299,7 +1300,8 @@ async function crawlPage(
       url,
       retryCount,
       linkTitleMap,
-      checkRedirectDuplicates
+      checkRedirectDuplicates,
+      originalHrefMap
     ),
     new Promise((_, reject) => {
       setTimeout(() => {
@@ -1330,7 +1332,8 @@ async function crawlPageInternal(
   url,
   retryCount = 0,
   linkTitleMap = null,
-  checkRedirectDuplicates = false
+  checkRedirectDuplicates = false,
+  originalHrefMap = null
 ) {
   const page = await context.newPage();
 
@@ -1981,6 +1984,8 @@ async function crawlPageInternal(
           // Combine all links - extract URLs and store titles in a map
           const linkUrls = [];
           const linkTitlesMap = new Map();
+          // Note: This Map is in browser context (page.evaluate), separate from Node.js originalHrefMap
+          const browserOriginalHrefMap = new Map();
 
           // Process regular links
           allLinks.forEach((linkObj) => {
@@ -2002,15 +2007,18 @@ async function crawlPageInternal(
               // Store original href for this resolved URL
               if (linkObj.originalHref) {
                 const normalized = linkObj.url.replace(/\/$/, "");
-                originalHrefMap.set(normalized, linkObj.originalHref);
-                originalHrefMap.set(linkObj.url, linkObj.originalHref);
+                browserOriginalHrefMap.set(normalized, linkObj.originalHref);
+                browserOriginalHrefMap.set(linkObj.url, linkObj.originalHref);
                 if (linkObj.url.endsWith("/")) {
-                  originalHrefMap.set(
+                  browserOriginalHrefMap.set(
                     linkObj.url.slice(0, -1),
                     linkObj.originalHref
                   );
                 } else {
-                  originalHrefMap.set(linkObj.url + "/", linkObj.originalHref);
+                  browserOriginalHrefMap.set(
+                    linkObj.url + "/",
+                    linkObj.originalHref
+                  );
                 }
               }
             }
@@ -2029,25 +2037,9 @@ async function crawlPageInternal(
             linkTitlesObj[url] = title;
           });
 
-          // Convert original hrefs Map to plain object
+          // Convert original hrefs Map to plain object (already populated above)
           const originalHrefObj = {};
-          const originalHrefsMap = new Map();
-          allLinks.forEach((linkObj) => {
-            if (linkObj && linkObj.url && linkObj.originalHref) {
-              const normalized = linkObj.url.replace(/\/$/, "");
-              originalHrefsMap.set(normalized, linkObj.originalHref);
-              originalHrefsMap.set(linkObj.url, linkObj.originalHref);
-              if (linkObj.url.endsWith("/")) {
-                originalHrefsMap.set(
-                  linkObj.url.slice(0, -1),
-                  linkObj.originalHref
-                );
-              } else {
-                originalHrefsMap.set(linkObj.url + "/", linkObj.originalHref);
-              }
-            }
-          });
-          originalHrefsMap.forEach((originalHref, url) => {
+          browserOriginalHrefMap.forEach((originalHref, url) => {
             originalHrefObj[url] = originalHref;
           });
 
@@ -2163,8 +2155,8 @@ async function crawlPageInternal(
           }
         }
 
-        // Store original hrefs in the global map
-        if (pageData.originalHrefs) {
+        // Store original hrefs in the global map (if map is provided)
+        if (originalHrefMap && pageData.originalHrefs) {
           // Convert object back to Map entries
           if (pageData.originalHrefs instanceof Map) {
             pageData.originalHrefs.forEach((originalHref, linkUrl) => {
@@ -2257,7 +2249,8 @@ async function crawlPageInternal(
           url,
           retryCount + 1,
           linkTitleMap,
-          checkRedirectDuplicates
+          checkRedirectDuplicates,
+          originalHrefMap
         );
       }
 
@@ -2720,7 +2713,8 @@ async function crawlWebsite({
               url,
               0,
               linkTitleMap,
-              checkRedirectDuplicates
+              checkRedirectDuplicates,
+              originalHrefMap
             );
 
             // Use final URL after redirects ONLY if redirect duplicate checking is enabled
