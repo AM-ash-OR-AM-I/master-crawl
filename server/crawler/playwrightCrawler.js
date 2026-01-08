@@ -714,16 +714,27 @@ async function interactWithDropdowns(page) {
                   const href = link.getAttribute("href");
                   if (href && href !== "#" && !href.startsWith("javascript:")) {
                     try {
-                      const resolvedUrl = new URL(href, window.location.href);
+                      // Resolve relative to current page (window.location.href)
+                      let resolvedUrl;
+                      if (
+                        href.startsWith("http://") ||
+                        href.startsWith("https://")
+                      ) {
+                        resolvedUrl = new URL(href);
+                      } else if (href.startsWith("//")) {
+                        resolvedUrl = new URL(
+                          href,
+                          window.location.protocol + "//" + window.location.host
+                        );
+                      } else if (href.startsWith("/")) {
+                        resolvedUrl = new URL(href, window.location.origin);
+                      } else {
+                        // Relative URL - resolve relative to current page
+                        resolvedUrl = new URL(href, window.location.href);
+                      }
                       links.push(resolvedUrl.href);
                     } catch {
-                      if (href.startsWith("/") || href.startsWith("http")) {
-                        try {
-                          links.push(
-                            new URL(href, window.location.origin).href
-                          );
-                        } catch {}
-                      }
+                      // Skip invalid URLs
                     }
                   }
                 });
@@ -801,7 +812,25 @@ async function handlePagination(page, baseUrl) {
 
               if (href && href !== "#" && !href.startsWith("javascript:")) {
                 try {
-                  const resolvedUrl = new URL(href, window.location.href);
+                  // Resolve relative to current page (window.location.href)
+                  let resolvedUrl;
+                  if (
+                    href.startsWith("http://") ||
+                    href.startsWith("https://")
+                  ) {
+                    resolvedUrl = new URL(href);
+                  } else if (href.startsWith("//")) {
+                    resolvedUrl = new URL(
+                      href,
+                      window.location.protocol + "//" + window.location.host
+                    );
+                  } else if (href.startsWith("/")) {
+                    resolvedUrl = new URL(href, window.location.origin);
+                  } else {
+                    // Relative URL - resolve relative to current page
+                    resolvedUrl = new URL(href, window.location.href);
+                  }
+
                   // Only include pagination links (next, previous, numbered pages)
                   const text = el.textContent?.toLowerCase() || "";
                   const ariaLabel =
@@ -830,7 +859,22 @@ async function handlePagination(page, baseUrl) {
           const href = nextLink.getAttribute("href");
           if (href) {
             try {
-              links.push(new URL(href, window.location.href).href);
+              // Resolve relative to current page (window.location.href)
+              let resolvedUrl;
+              if (href.startsWith("http://") || href.startsWith("https://")) {
+                resolvedUrl = new URL(href);
+              } else if (href.startsWith("//")) {
+                resolvedUrl = new URL(
+                  href,
+                  window.location.protocol + "//" + window.location.host
+                );
+              } else if (href.startsWith("/")) {
+                resolvedUrl = new URL(href, window.location.origin);
+              } else {
+                // Relative URL - resolve relative to current page
+                resolvedUrl = new URL(href, window.location.href);
+              }
+              links.push(resolvedUrl.href);
             } catch {}
           }
         }
@@ -1110,6 +1154,8 @@ async function extractPageDataWithoutEval(page, url) {
     } catch {}
 
     // Extract links using locator API (doesn't need eval)
+    // Also extract link titles for better page titles
+    const linkTitles = new Map();
     try {
       const linkElements = await page.locator("a[href]").all();
       for (const linkEl of linkElements) {
@@ -1117,8 +1163,50 @@ async function extractPageDataWithoutEval(page, url) {
           const href = await linkEl.getAttribute("href");
           if (href && href !== "#" && !href.startsWith("javascript:")) {
             try {
-              const resolvedUrl = new URL(href, url);
+              // Resolve URL relative to current page URL (not base URL)
+              // This ensures relative URLs resolve correctly
+              let resolvedUrl;
+
+              // Handle different URL types:
+              // 1. Absolute URLs (http://, https://) - use as-is
+              if (href.startsWith("http://") || href.startsWith("https://")) {
+                resolvedUrl = new URL(href);
+              }
+              // 2. Protocol-relative URLs (//example.com) - use current protocol
+              else if (href.startsWith("//")) {
+                const urlObj = new URL(url);
+                resolvedUrl = new URL(
+                  href,
+                  urlObj.protocol + "//" + urlObj.host
+                );
+              }
+              // 3. Absolute paths (starting with /) - resolve relative to origin
+              else if (href.startsWith("/")) {
+                const urlObj = new URL(url);
+                resolvedUrl = new URL(href, urlObj.origin);
+              }
+              // 4. Relative URLs (no leading /) - resolve relative to current page
+              // This is the key fix: "about/index.php" on "/about" becomes "/about/about/index.php"
+              else {
+                resolvedUrl = new URL(href, url);
+              }
+
               links.push(resolvedUrl.href);
+
+              // Extract link text and title attribute
+              try {
+                const linkText = (await linkEl.textContent())?.trim() || "";
+                const titleAttr =
+                  (await linkEl.getAttribute("title"))?.trim() || "";
+                const linkTitle = linkText || titleAttr;
+
+                if (linkTitle) {
+                  const normalized = resolvedUrl.href.replace(/\/$/, "");
+                  linkTitles.set(resolvedUrl.href, linkTitle);
+                  linkTitles.set(normalized, linkTitle);
+                  linkTitles.set(normalized + "/", linkTitle);
+                }
+              } catch {}
             } catch {
               // Skip invalid URLs
             }
@@ -1156,6 +1244,7 @@ async function extractPageDataWithoutEval(page, url) {
           canonical: "",
         },
         links: allLinks,
+        linkTitles: linkTitles,
       },
     };
   } catch (error) {
@@ -1171,12 +1260,12 @@ async function extractPageDataWithoutEval(page, url) {
 /**
  * Crawl a single page with retry logic and overall timeout protection
  */
-async function crawlPage(context, url, retryCount = 0) {
+async function crawlPage(context, url, retryCount = 0, linkTitleMap = null) {
   const PAGE_CRAWL_TIMEOUT = 60000; // 60 seconds max per page
 
   // Wrap entire crawl in timeout
   return Promise.race([
-    crawlPageInternal(context, url, retryCount),
+    crawlPageInternal(context, url, retryCount, linkTitleMap),
     new Promise((_, reject) => {
       setTimeout(() => {
         reject(
@@ -1201,7 +1290,12 @@ async function crawlPage(context, url, retryCount = 0) {
 /**
  * Internal crawl page function
  */
-async function crawlPageInternal(context, url, retryCount = 0) {
+async function crawlPageInternal(
+  context,
+  url,
+  retryCount = 0,
+  linkTitleMap = null
+) {
   const page = await context.newPage();
 
   // Block unnecessary resources for faster crawling
@@ -1459,216 +1553,235 @@ async function crawlPageInternal(context, url, retryCount = 0) {
     ]).catch(() => []);
 
     // Extract title with fallback
+    // First, check if we have a link title for this URL (highest priority)
     let title = "Untitled";
+    if (linkTitleMap) {
+      const normalizedUrlForTitle = getCanonicalUrl(url);
+      const linkTitle =
+        linkTitleMap.get(url) ||
+        linkTitleMap.get(normalizedUrlForTitle) ||
+        linkTitleMap.get(normalizedUrlForTitle + "/") ||
+        linkTitleMap.get(normalizedUrlForTitle.replace(/\/$/, ""));
+
+      if (linkTitle && linkTitle.trim()) {
+        title = linkTitle.trim();
+      }
+    }
+
     const blockedTitles = [
       "just a moment",
       "checking your browser",
       "please wait",
     ];
 
-    try {
-      // For hash routes, try to get route-specific content first
-      const pageInfo = await safeEvaluate(
-        page,
-        (isHashRoute) => {
-          // Try multiple selectors for title - prioritize page-specific content over generic site title
-          const titleEl = document.querySelector("title");
-          const h1El = document.querySelector("h1");
-          const h2El = document.querySelector("h2");
-          const metaTitle = document.querySelector('meta[property="og:title"]');
-          const metaTwitterTitle = document.querySelector(
-            'meta[name="twitter:title"]'
-          );
-
-          // Get all possible title sources
-          const titleTag = titleEl?.textContent?.trim() || "";
-          const ogTitle = metaTitle?.getAttribute("content")?.trim() || "";
-          const twitterTitle =
-            metaTwitterTitle?.getAttribute("content")?.trim() || "";
-          const h1Text = h1El?.textContent?.trim() || "";
-          const h2Text = h2El?.textContent?.trim() || "";
-
-          // Prefer page-specific titles (og:title, h1) over generic <title> tag
-          // Many sites have generic titles like "Company Name" in <title> but specific content in h1/og:title
-          let titleText = "";
-
-          // First priority: og:title (usually page-specific)
-          if (ogTitle && ogTitle.length > 0 && ogTitle.length < 200) {
-            titleText = ogTitle;
-          }
-          // Second priority: twitter:title
-          else if (
-            twitterTitle &&
-            twitterTitle.length > 0 &&
-            twitterTitle.length < 200
-          ) {
-            titleText = twitterTitle;
-          }
-          // Third priority: h1 (usually the main page heading)
-          else if (h1Text && h1Text.length > 0 && h1Text.length < 200) {
-            titleText = h1Text;
-          }
-          // Fourth priority: <title> tag (may be generic)
-          else if (titleTag && titleTag.length > 0) {
-            titleText = titleTag;
-          }
-          // Fifth priority: h2
-          else if (h2Text && h2Text.length > 0 && h2Text.length < 200) {
-            titleText = h2Text;
-          }
-
-          // For hash routes, also check for route-specific content
-          if (isHashRoute && !titleText) {
-            // Look for main content area
-            const mainContent =
-              document.querySelector("main") ||
-              document.querySelector('[role="main"]') ||
-              document.querySelector(".content") ||
-              document.querySelector("#content") ||
-              document.body;
-
-            if (mainContent) {
-              const h1 = mainContent.querySelector("h1");
-              if (h1) titleText = h1.textContent?.trim() || "";
-            }
-          }
-
-          return {
-            title: titleText || "Untitled",
-            hasContent:
-              document.body && document.body.textContent.trim().length > 50,
-            // Return all sources for debugging/fallback
-            sources: { titleTag, ogTitle, twitterTitle, h1Text, h2Text },
-          };
-        },
-        { title: "Untitled", hasContent: false, sources: {} },
-        isHashRoute
-      );
-
-      title = pageInfo.title;
-
-      // If title looks like a generic site name (very short or doesn't contain URL keywords), try URL-based title
-      if (title && title.length < 50) {
-        try {
-          const urlObj = new URL(url);
-          const pathParts = urlObj.pathname.split("/").filter((p) => p);
-          if (pathParts.length > 0) {
-            const lastPathPart = pathParts[pathParts.length - 1]
-              .replace(/-/g, " ")
-              .replace(/_/g, " ")
-              .toLowerCase();
-
-            // Check if the title doesn't seem related to the URL path
-            // This catches cases where title is just "Company Name" for all pages
-            const titleLower = title.toLowerCase();
-            const pathKeywords = lastPathPart
-              .split(" ")
-              .filter((w) => w.length > 3);
-            const hasPathKeyword = pathKeywords.some((kw) =>
-              titleLower.includes(kw)
+    // Only extract from page if we don't have a link title
+    if (title === "Untitled") {
+      try {
+        // For hash routes, try to get route-specific content first
+        const pageInfo = await safeEvaluate(
+          page,
+          (isHashRoute) => {
+            // Try multiple selectors for title - prioritize page-specific content over generic site title
+            const titleEl = document.querySelector("title");
+            const h1El = document.querySelector("h1");
+            const h2El = document.querySelector("h2");
+            const metaTitle = document.querySelector(
+              'meta[property="og:title"]'
+            );
+            const metaTwitterTitle = document.querySelector(
+              'meta[name="twitter:title"]'
             );
 
-            // If title doesn't contain any path keywords and h1 exists, prefer URL-based title
-            if (
-              !hasPathKeyword &&
-              pathParts.length > 0 &&
-              pageInfo.sources?.h1Text
-            ) {
-              // Keep h1 if it exists
-            } else if (!hasPathKeyword && pathParts.length > 0) {
-              // Use URL-based title as fallback
-              const urlTitle = pathParts[pathParts.length - 1]
-                .replace(/-/g, " ")
-                .replace(/_/g, " ")
-                .replace(/\b\w/g, (l) => l.toUpperCase());
-              if (urlTitle.length > 2) {
-                title = urlTitle;
-              }
-            }
-          }
-        } catch {}
-      }
+            // Get all possible title sources
+            const titleTag = titleEl?.textContent?.trim() || "";
+            const ogTitle = metaTitle?.getAttribute("content")?.trim() || "";
+            const twitterTitle =
+              metaTwitterTitle?.getAttribute("content")?.trim() || "";
+            const h1Text = h1El?.textContent?.trim() || "";
+            const h2Text = h2El?.textContent?.trim() || "";
 
-      // If title is still "Just a moment" or similar, use URL-based fallback immediately
-      if (
-        blockedTitles.some((blocked) => title.toLowerCase().includes(blocked))
-      ) {
-        // For hash routes, extract from hash path
-        if (isHashRoute) {
-          try {
-            const urlObj = new URL(url);
-            const hash = urlObj.hash?.substring(2); // Remove #/
-            if (hash) {
-              const hashParts = hash.split("/").filter((p) => p);
-              if (hashParts.length > 0) {
-                const lastPart = hashParts[hashParts.length - 1];
-                title =
-                  lastPart
-                    .replace(/-/g, " ")
-                    .replace(/_/g, " ")
-                    .replace(/\b\w/g, (l) => l.toUpperCase()) || "Page";
-              } else {
-                title = "Home";
-              }
-            } else {
-              title = "Home";
+            // Prefer page-specific titles (og:title, h1) over generic <title> tag
+            // Many sites have generic titles like "Company Name" in <title> but specific content in h1/og:title
+            let titleText = "";
+
+            // First priority: og:title (usually page-specific)
+            if (ogTitle && ogTitle.length > 0 && ogTitle.length < 200) {
+              titleText = ogTitle;
             }
-          } catch {
-            title = "Page";
-          }
-        } else {
-          // For non-hash routes, try waiting a bit more
-          console.warn(
-            `⚠️ Title still shows bot protection for ${url}, using URL-based title...`
-          );
+            // Second priority: twitter:title
+            else if (
+              twitterTitle &&
+              twitterTitle.length > 0 &&
+              twitterTitle.length < 200
+            ) {
+              titleText = twitterTitle;
+            }
+            // Third priority: h1 (usually the main page heading)
+            else if (h1Text && h1Text.length > 0 && h1Text.length < 200) {
+              titleText = h1Text;
+            }
+            // Fourth priority: <title> tag (may be generic)
+            else if (titleTag && titleTag.length > 0) {
+              titleText = titleTag;
+            }
+            // Fifth priority: h2
+            else if (h2Text && h2Text.length > 0 && h2Text.length < 200) {
+              titleText = h2Text;
+            }
+
+            // For hash routes, also check for route-specific content
+            if (isHashRoute && !titleText) {
+              // Look for main content area
+              const mainContent =
+                document.querySelector("main") ||
+                document.querySelector('[role="main"]') ||
+                document.querySelector(".content") ||
+                document.querySelector("#content") ||
+                document.body;
+
+              if (mainContent) {
+                const h1 = mainContent.querySelector("h1");
+                if (h1) titleText = h1.textContent?.trim() || "";
+              }
+            }
+
+            return {
+              title: titleText || "Untitled",
+              hasContent:
+                document.body && document.body.textContent.trim().length > 50,
+              // Return all sources for debugging/fallback
+              sources: { titleTag, ogTitle, twitterTitle, h1Text, h2Text },
+            };
+          },
+          { title: "Untitled", hasContent: false, sources: {} },
+          isHashRoute
+        );
+
+        title = pageInfo.title;
+
+        // If title looks like a generic site name (very short or doesn't contain URL keywords), try URL-based title
+        if (title && title.length < 50) {
           try {
             const urlObj = new URL(url);
             const pathParts = urlObj.pathname.split("/").filter((p) => p);
             if (pathParts.length > 0) {
-              title =
-                pathParts[pathParts.length - 1]
+              const lastPathPart = pathParts[pathParts.length - 1]
+                .replace(/-/g, " ")
+                .replace(/_/g, " ")
+                .toLowerCase();
+
+              // Check if the title doesn't seem related to the URL path
+              // This catches cases where title is just "Company Name" for all pages
+              const titleLower = title.toLowerCase();
+              const pathKeywords = lastPathPart
+                .split(" ")
+                .filter((w) => w.length > 3);
+              const hasPathKeyword = pathKeywords.some((kw) =>
+                titleLower.includes(kw)
+              );
+
+              // If title doesn't contain any path keywords and h1 exists, prefer URL-based title
+              if (
+                !hasPathKeyword &&
+                pathParts.length > 0 &&
+                pageInfo.sources?.h1Text
+              ) {
+                // Keep h1 if it exists
+              } else if (!hasPathKeyword && pathParts.length > 0) {
+                // Use URL-based title as fallback
+                const urlTitle = pathParts[pathParts.length - 1]
                   .replace(/-/g, " ")
-                  .replace(/\b\w/g, (l) => l.toUpperCase()) || "Page";
+                  .replace(/_/g, " ")
+                  .replace(/\b\w/g, (l) => l.toUpperCase());
+                if (urlTitle.length > 2) {
+                  title = urlTitle;
+                }
+              }
+            }
+          } catch {}
+        }
+
+        // If title is still "Just a moment" or similar, use URL-based fallback immediately
+        if (
+          blockedTitles.some((blocked) => title.toLowerCase().includes(blocked))
+        ) {
+          // For hash routes, extract from hash path
+          if (isHashRoute) {
+            try {
+              const urlObj = new URL(url);
+              const hash = urlObj.hash?.substring(2); // Remove #/
+              if (hash) {
+                const hashParts = hash.split("/").filter((p) => p);
+                if (hashParts.length > 0) {
+                  const lastPart = hashParts[hashParts.length - 1];
+                  title =
+                    lastPart
+                      .replace(/-/g, " ")
+                      .replace(/_/g, " ")
+                      .replace(/\b\w/g, (l) => l.toUpperCase()) || "Page";
+                } else {
+                  title = "Home";
+                }
+              } else {
+                title = "Home";
+              }
+            } catch {
+              title = "Page";
+            }
+          } else {
+            // For non-hash routes, try waiting a bit more
+            console.warn(
+              `⚠️ Title still shows bot protection for ${url}, using URL-based title...`
+            );
+            try {
+              const urlObj = new URL(url);
+              const pathParts = urlObj.pathname.split("/").filter((p) => p);
+              if (pathParts.length > 0) {
+                title =
+                  pathParts[pathParts.length - 1]
+                    .replace(/-/g, " ")
+                    .replace(/\b\w/g, (l) => l.toUpperCase()) || "Page";
+              } else {
+                title = "Home";
+              }
+            } catch {
+              title = "Page";
+            }
+          }
+        }
+      } catch (error) {
+        // Fallback: use URL-based title
+        try {
+          if (isHashRoute) {
+            const urlObj = new URL(url);
+            const hash = urlObj.hash?.substring(2);
+            if (hash) {
+              const hashParts = hash.split("/").filter((p) => p);
+              title =
+                hashParts.length > 0
+                  ? hashParts[hashParts.length - 1]
+                      .replace(/-/g, " ")
+                      .replace(/_/g, " ")
+                      .replace(/\b\w/g, (l) => l.toUpperCase())
+                  : "Home";
             } else {
               title = "Home";
             }
-          } catch {
-            title = "Page";
-          }
-        }
-      }
-    } catch (error) {
-      // Fallback: use URL-based title
-      try {
-        if (isHashRoute) {
-          const urlObj = new URL(url);
-          const hash = urlObj.hash?.substring(2);
-          if (hash) {
-            const hashParts = hash.split("/").filter((p) => p);
+          } else {
+            const urlObj = new URL(url);
+            const pathParts = urlObj.pathname.split("/").filter((p) => p);
             title =
-              hashParts.length > 0
-                ? hashParts[hashParts.length - 1]
+              pathParts.length > 0
+                ? pathParts[pathParts.length - 1]
                     .replace(/-/g, " ")
-                    .replace(/_/g, " ")
                     .replace(/\b\w/g, (l) => l.toUpperCase())
                 : "Home";
-          } else {
-            title = "Home";
           }
-        } else {
-          const urlObj = new URL(url);
-          const pathParts = urlObj.pathname.split("/").filter((p) => p);
-          title =
-            pathParts.length > 0
-              ? pathParts[pathParts.length - 1]
-                  .replace(/-/g, " ")
-                  .replace(/\b\w/g, (l) => l.toUpperCase())
-              : "Home";
+        } catch {
+          title = "Untitled";
         }
-      } catch {
-        title = "Untitled";
       }
-    }
+    } // End of if (title === "Untitled")
 
     // Extract comprehensive page data (with CSP/eval fallback)
     let pageData;
@@ -1707,23 +1820,84 @@ async function crawlPageInternal(context, url, retryCount = 0) {
             .split(/\s+/)
             .filter((w) => w.length > 0).length;
 
-          // Extract links
+          // Extract links with title information
           const allLinks = Array.from(document.querySelectorAll("a[href]"))
             .map((a) => {
               const href = a.getAttribute("href");
               if (!href) return null;
+
+              // Extract link text (text content inside <a> tag)
+              let linkText = "";
+              // Get direct text content, excluding nested elements
+              const textNodes = Array.from(a.childNodes)
+                .filter((node) => node.nodeType === Node.TEXT_NODE)
+                .map((node) => node.textContent.trim())
+                .join(" ")
+                .trim();
+
+              // If no direct text, get all text content (including nested elements)
+              if (!textNodes) {
+                linkText = a.textContent?.trim() || "";
+              } else {
+                linkText = textNodes;
+              }
+
+              // Get title attribute
+              const titleAttr = a.getAttribute("title")?.trim() || "";
+
+              // Priority: link text > title attribute
+              const linkTitle = linkText || titleAttr;
+
               try {
-                const base = window.location.href;
-                const resolvedUrl = new URL(href, base);
-                return resolvedUrl.href;
-              } catch {
-                if (href.startsWith("#")) {
-                  return (
-                    window.location.origin + window.location.pathname + href
+                // Resolve URL relative to current page (window.location.href)
+                // This ensures relative URLs like "about/index.php" resolve correctly
+                // when on a page like "https://example.com/about"
+                const currentPageUrl = window.location.href;
+                let resolvedUrl;
+
+                // Handle different URL types:
+                // 1. Absolute URLs (http://, https://) - use as-is
+                if (href.startsWith("http://") || href.startsWith("https://")) {
+                  resolvedUrl = new URL(href);
+                }
+                // 2. Protocol-relative URLs (//example.com) - use current protocol
+                else if (href.startsWith("//")) {
+                  resolvedUrl = new URL(
+                    href,
+                    window.location.protocol + "//" + window.location.host
                   );
                 }
+                // 3. Absolute paths (starting with /) - resolve relative to origin
+                else if (href.startsWith("/")) {
+                  resolvedUrl = new URL(href, window.location.origin);
+                }
+                // 4. Relative URLs (no leading /) - resolve relative to current page
+                // This is the key fix: "about/index.php" on "/about" becomes "/about/about/index.php"
+                else {
+                  resolvedUrl = new URL(href, currentPageUrl);
+                }
+
+                return {
+                  url: resolvedUrl.href,
+                  title: linkTitle || null,
+                };
+              } catch {
+                // Fallback for hash links
+                if (href.startsWith("#")) {
+                  const url =
+                    window.location.origin + window.location.pathname + href;
+                  return {
+                    url: url,
+                    title: linkTitle || null,
+                  };
+                }
+                // Last resort: try relative to origin (shouldn't normally happen)
                 try {
-                  return new URL(href, window.location.origin).href;
+                  const url = new URL(href, window.location.origin).href;
+                  return {
+                    url: url,
+                    title: linkTitle || null,
+                  };
                 } catch {
                   return null;
                 }
@@ -1750,8 +1924,42 @@ async function crawlPageInternal(context, url, retryCount = 0) {
             })
             .filter(Boolean);
 
-          // Combine all links
-          const combinedLinks = [...new Set([...allLinks, ...fragmentLinks])];
+          // Combine all links - extract URLs and store titles in a map
+          const linkUrls = [];
+          const linkTitlesMap = new Map();
+
+          // Process regular links
+          allLinks.forEach((linkObj) => {
+            if (typeof linkObj === "string") {
+              linkUrls.push(linkObj);
+            } else if (linkObj && linkObj.url) {
+              linkUrls.push(linkObj.url);
+              if (linkObj.title) {
+                // Normalize URL for title mapping (same as visited check)
+                const normalized = linkObj.url.replace(/\/$/, "");
+                linkTitlesMap.set(normalized, linkObj.title);
+                linkTitlesMap.set(linkObj.url, linkObj.title); // Also store with trailing slash
+                if (linkObj.url.endsWith("/")) {
+                  linkTitlesMap.set(linkObj.url.slice(0, -1), linkObj.title);
+                } else {
+                  linkTitlesMap.set(linkObj.url + "/", linkObj.title);
+                }
+              }
+            }
+          });
+
+          // Process fragment links (they're just URLs)
+          fragmentLinks.forEach((url) => {
+            linkUrls.push(url);
+          });
+
+          const combinedLinks = [...new Set(linkUrls)];
+
+          // Convert Map to plain object for serialization (Maps can't be serialized in evaluate)
+          const linkTitlesObj = {};
+          linkTitlesMap.forEach((title, url) => {
+            linkTitlesObj[url] = title;
+          });
 
           // Detect SPA framework
           const isSPA = !!(
@@ -1805,6 +2013,7 @@ async function crawlPageInternal(context, url, retryCount = 0) {
               word_count: wordCount,
             },
             links: combinedLinks,
+            linkTitles: linkTitlesObj,
             tech: {
               is_spa: isSPA,
               route_type: routeType,
@@ -1826,7 +2035,10 @@ async function crawlPageInternal(context, url, retryCount = 0) {
           `⚠️ Using fallback extraction for ${finalUrl} (eval disabled)`
         );
         const fallbackData = await extractPageDataWithoutEval(page, finalUrl);
-        pageData = fallbackData.pageData || { links: [] };
+        pageData = fallbackData.pageData || {
+          links: [],
+          linkTitles: new Map(),
+        };
         title = fallbackData.title || title;
         links = fallbackData.links || [];
       } else {
@@ -1842,6 +2054,23 @@ async function crawlPageInternal(context, url, retryCount = 0) {
         links = [...new Set(allExtractedLinks)].sort((a, b) =>
           a.localeCompare(b)
         ); // Remove duplicates and sort
+
+        // Store link titles in the global map
+        if (pageData.linkTitles) {
+          // Convert object back to Map entries
+          if (pageData.linkTitles instanceof Map) {
+            pageData.linkTitles.forEach((linkTitle, linkUrl) => {
+              linkTitleMap.set(linkUrl, linkTitle);
+            });
+          } else if (typeof pageData.linkTitles === "object") {
+            // It's a plain object from evaluate()
+            Object.entries(pageData.linkTitles).forEach(
+              ([linkUrl, linkTitle]) => {
+                linkTitleMap.set(linkUrl, linkTitle);
+              }
+            );
+          }
+        }
       }
 
       // Build normalized URL path from final URL (after redirects)
@@ -1915,7 +2144,7 @@ async function crawlPageInternal(context, url, retryCount = 0) {
         );
         await page.close();
         await new Promise((resolve) => setTimeout(resolve, delay));
-        return crawlPage(context, url, retryCount + 1);
+        return crawlPage(context, url, retryCount + 1, linkTitleMap);
       }
 
       console.warn(
@@ -1957,9 +2186,11 @@ async function crawlWebsite({
   const baseUrl = domain.startsWith("http") ? domain : `https://${domain}`;
 
   const visited = new Set();
-  const queue = [{ url: baseUrl, depth: 0, parentUrl: null }];
+  const queue = [{ url: baseUrl, depth: 0, parentUrl: null, linkTitle: null }];
   const pages = [];
   const CONCURRENCY = 6;
+  // Map to store link titles for discovered URLs
+  const linkTitleMap = new Map();
 
   // Error tracking for comprehensive reporting
   const crawlErrors = {
@@ -2286,6 +2517,23 @@ async function crawlWebsite({
             const hasHashRoute = item.url.includes("#/");
             const url = normalizeUrl(item.url, hasHashRoute);
 
+            // Check if we have a link title for this URL
+            const itemLinkTitle = item.linkTitle || null;
+            if (itemLinkTitle) {
+              const normalizedForTitle = getCanonicalUrl(url);
+              linkTitleMap.set(url, itemLinkTitle);
+              linkTitleMap.set(normalizedForTitle, itemLinkTitle);
+              linkTitleMap.set(normalizedForTitle + "/", itemLinkTitle);
+              if (
+                normalizedForTitle !== normalizedForTitle.replace(/\/$/, "")
+              ) {
+                linkTitleMap.set(
+                  normalizedForTitle.replace(/\/$/, ""),
+                  itemLinkTitle
+                );
+              }
+            }
+
             // Skip if already visited, invalid, or exceeds depth
             if (!url || hasVisited(visited, url) || item.depth > maxDepth) {
               return { success: true, skipped: true };
@@ -2328,7 +2576,7 @@ async function crawlWebsite({
               pageData,
               finalUrl,
               originalUrl,
-            } = await crawlPage(context, url);
+            } = await crawlPage(context, url, 0, linkTitleMap);
 
             // Use final URL after redirects ONLY if redirect duplicate checking is enabled
             // Otherwise, ignore redirects and use original URL (default behavior)
@@ -2532,10 +2780,18 @@ async function crawlWebsite({
                     item.depth < maxDepth &&
                     linkUrl.protocol.startsWith("http") // Only HTTP/HTTPS
                   ) {
+                    // Get link title from the linkTitleMap if available
+                    const linkTitle =
+                      linkTitleMap.get(link) ||
+                      linkTitleMap.get(normalizedLink) ||
+                      linkTitleMap.get(getCanonicalUrl(normalizedLink)) ||
+                      linkTitleMap.get(getCanonicalUrl(normalizedLink) + "/");
+
                     queue.push({
                       url: normalizedLink,
                       depth: item.depth + 1,
                       parentUrl: checkRedirectDuplicates ? actualUrl : url, // Use actual URL after redirects only if redirect checking enabled
+                      linkTitle: linkTitle || null,
                     });
                   }
                 } catch (linkError) {
