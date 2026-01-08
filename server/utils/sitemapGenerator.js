@@ -308,12 +308,16 @@ function generateExcelSitemap(pages, baseUrl) {
         }
       } catch {}
       
+      // Extract original href from pageData if available
+      const originalHref = page.pageData?.originalHref || null;
+      
       brokenLinks.push({
         url: page.url,
         errorType: errorType,
         suggestedTitle: suggestedTitle,
         parentUrl: page.parentUrl || '',
-        depth: page.depth
+        depth: page.depth,
+        originalHref: originalHref
       });
     } else {
       // Clean up title
@@ -445,6 +449,7 @@ function generateExcelSitemap(pages, baseUrl) {
       'Error Type': link.errorType,
       'Suggested Title': link.suggestedTitle,
       'Found On Page': foundOnPage,
+      'Original Href': link.originalHref || '',
       'Depth': link.depth,
       'Recommendation': link.errorType === '404 Not Found' ? 'Redirect or Remove' : 'Investigate'
     };
@@ -476,6 +481,7 @@ function generateExcelSitemap(pages, baseUrl) {
       { wch: 20 }, // Error Type
       { wch: 30 }, // Suggested Title
       { wch: 60 }, // Found On Page
+      { wch: 30 }, // Original Href
       { wch: 10 }, // Depth
       { wch: 25 }  // Recommendation
     ];

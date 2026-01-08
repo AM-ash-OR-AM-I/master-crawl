@@ -1154,8 +1154,9 @@ async function extractPageDataWithoutEval(page, url) {
     } catch {}
 
     // Extract links using locator API (doesn't need eval)
-    // Also extract link titles for better page titles
+    // Also extract link titles and original hrefs for better page titles
     const linkTitles = new Map();
+    const originalHrefs = new Map();
     try {
       const linkElements = await page.locator("a[href]").all();
       for (const linkEl of linkElements) {
@@ -1163,6 +1164,9 @@ async function extractPageDataWithoutEval(page, url) {
           const href = await linkEl.getAttribute("href");
           if (href && href !== "#" && !href.startsWith("javascript:")) {
             try {
+              // Store original href before resolution
+              const originalHref = href;
+
               // Resolve URL relative to current page URL (not base URL)
               // This ensures relative URLs resolve correctly
               let resolvedUrl;
@@ -1206,6 +1210,12 @@ async function extractPageDataWithoutEval(page, url) {
                   linkTitles.set(normalized, linkTitle);
                   linkTitles.set(normalized + "/", linkTitle);
                 }
+
+                // Store original href for this resolved URL
+                const normalized = resolvedUrl.href.replace(/\/$/, "");
+                originalHrefs.set(resolvedUrl.href, originalHref);
+                originalHrefs.set(normalized, originalHref);
+                originalHrefs.set(normalized + "/", originalHref);
               } catch {}
             } catch {
               // Skip invalid URLs
@@ -1235,6 +1245,18 @@ async function extractPageDataWithoutEval(page, url) {
 
     const allLinks = [...new Set([...links, ...fragmentLinks])];
 
+    // Extract original hrefs map (we stored them in linkTitles above, need to separate)
+    // Actually, we need to track original hrefs separately
+    const originalHrefsForPage = new Map();
+    // Note: We'll need to track this properly in the main extraction function
+    // For now, this fallback function won't have original hrefs
+
+    // Convert originalHrefs Map to plain object for serialization
+    const originalHrefsObj = {};
+    originalHrefs.forEach((originalHref, linkUrl) => {
+      originalHrefsObj[linkUrl] = originalHref;
+    });
+
     return {
       title: title.trim() || "Untitled",
       links: allLinks,
@@ -1245,6 +1267,7 @@ async function extractPageDataWithoutEval(page, url) {
         },
         links: allLinks,
         linkTitles: linkTitles,
+        originalHrefs: originalHrefsObj,
       },
     };
   } catch (error) {
@@ -1880,6 +1903,7 @@ async function crawlPageInternal(
                 return {
                   url: resolvedUrl.href,
                   title: linkTitle || null,
+                  originalHref: href, // Store original href attribute as-is
                 };
               } catch {
                 // Fallback for hash links
@@ -1889,6 +1913,7 @@ async function crawlPageInternal(
                   return {
                     url: url,
                     title: linkTitle || null,
+                    originalHref: href, // Store original href attribute as-is
                   };
                 }
                 // Last resort: try relative to origin (shouldn't normally happen)
@@ -1897,6 +1922,7 @@ async function crawlPageInternal(
                   return {
                     url: url,
                     title: linkTitle || null,
+                    originalHref: href, // Store original href attribute as-is
                   };
                 } catch {
                   return null;
@@ -1945,6 +1971,20 @@ async function crawlPageInternal(
                   linkTitlesMap.set(linkObj.url + "/", linkObj.title);
                 }
               }
+              // Store original href for this resolved URL
+              if (linkObj.originalHref) {
+                const normalized = linkObj.url.replace(/\/$/, "");
+                originalHrefMap.set(normalized, linkObj.originalHref);
+                originalHrefMap.set(linkObj.url, linkObj.originalHref);
+                if (linkObj.url.endsWith("/")) {
+                  originalHrefMap.set(
+                    linkObj.url.slice(0, -1),
+                    linkObj.originalHref
+                  );
+                } else {
+                  originalHrefMap.set(linkObj.url + "/", linkObj.originalHref);
+                }
+              }
             }
           });
 
@@ -1959,6 +1999,28 @@ async function crawlPageInternal(
           const linkTitlesObj = {};
           linkTitlesMap.forEach((title, url) => {
             linkTitlesObj[url] = title;
+          });
+
+          // Convert original hrefs Map to plain object
+          const originalHrefObj = {};
+          const originalHrefsMap = new Map();
+          allLinks.forEach((linkObj) => {
+            if (linkObj && linkObj.url && linkObj.originalHref) {
+              const normalized = linkObj.url.replace(/\/$/, "");
+              originalHrefsMap.set(normalized, linkObj.originalHref);
+              originalHrefsMap.set(linkObj.url, linkObj.originalHref);
+              if (linkObj.url.endsWith("/")) {
+                originalHrefsMap.set(
+                  linkObj.url.slice(0, -1),
+                  linkObj.originalHref
+                );
+              } else {
+                originalHrefsMap.set(linkObj.url + "/", linkObj.originalHref);
+              }
+            }
+          });
+          originalHrefsMap.forEach((originalHref, url) => {
+            originalHrefObj[url] = originalHref;
           });
 
           // Detect SPA framework
@@ -2014,6 +2076,7 @@ async function crawlPageInternal(
             },
             links: combinedLinks,
             linkTitles: linkTitlesObj,
+            originalHrefs: originalHrefObj,
             tech: {
               is_spa: isSPA,
               route_type: routeType,
@@ -2067,6 +2130,23 @@ async function crawlPageInternal(
             Object.entries(pageData.linkTitles).forEach(
               ([linkUrl, linkTitle]) => {
                 linkTitleMap.set(linkUrl, linkTitle);
+              }
+            );
+          }
+        }
+
+        // Store original hrefs in the global map
+        if (pageData.originalHrefs) {
+          // Convert object back to Map entries
+          if (pageData.originalHrefs instanceof Map) {
+            pageData.originalHrefs.forEach((originalHref, linkUrl) => {
+              originalHrefMap.set(linkUrl, originalHref);
+            });
+          } else if (typeof pageData.originalHrefs === "object") {
+            // It's a plain object from evaluate()
+            Object.entries(pageData.originalHrefs).forEach(
+              ([linkUrl, originalHref]) => {
+                originalHrefMap.set(linkUrl, originalHref);
               }
             );
           }
@@ -2186,11 +2266,21 @@ async function crawlWebsite({
   const baseUrl = domain.startsWith("http") ? domain : `https://${domain}`;
 
   const visited = new Set();
-  const queue = [{ url: baseUrl, depth: 0, parentUrl: null, linkTitle: null }];
+  const queue = [
+    {
+      url: baseUrl,
+      depth: 0,
+      parentUrl: null,
+      linkTitle: null,
+      originalHref: null,
+    },
+  ];
   const pages = [];
   const CONCURRENCY = 6;
   // Map to store link titles for discovered URLs
   const linkTitleMap = new Map();
+  // Map to store original href attributes for discovered URLs
+  const originalHrefMap = new Map();
 
   // Error tracking for comprehensive reporting
   const crawlErrors = {
@@ -2534,6 +2624,21 @@ async function crawlWebsite({
               }
             }
 
+            // Check if we have an original href for this URL
+            const itemOriginalHref = item.originalHref || null;
+            if (itemOriginalHref) {
+              const normalizedForHref = getCanonicalUrl(url);
+              originalHrefMap.set(url, itemOriginalHref);
+              originalHrefMap.set(normalizedForHref, itemOriginalHref);
+              originalHrefMap.set(normalizedForHref + "/", itemOriginalHref);
+              if (normalizedForHref !== normalizedForHref.replace(/\/$/, "")) {
+                originalHrefMap.set(
+                  normalizedForHref.replace(/\/$/, ""),
+                  itemOriginalHref
+                );
+              }
+            }
+
             // Skip if already visited, invalid, or exceeds depth
             if (!url || hasVisited(visited, url) || item.depth > maxDepth) {
               return { success: true, skipped: true };
@@ -2675,13 +2780,31 @@ async function crawlWebsite({
 
               // Only add to pages array if insert was successful (not a duplicate)
               if (pageResult.rows.length > 0) {
+                // Get original href for this page if available
+                const pageOriginalHref =
+                  item.originalHref ||
+                  originalHrefMap.get(urlToStore) ||
+                  originalHrefMap.get(getCanonicalUrl(urlToStore)) ||
+                  originalHrefMap.get(getCanonicalUrl(urlToStore) + "/") ||
+                  null;
+
+                // Store original href in pageData if available
+                const enhancedPageData = pageData
+                  ? {
+                      ...pageData,
+                      originalHref: pageOriginalHref,
+                    }
+                  : pageOriginalHref
+                  ? { originalHref: pageOriginalHref }
+                  : null;
+
                 pages.push({
                   id: pageResult.rows[0].id,
                   url: urlToStore,
                   depth: item.depth,
                   parentUrl: item.parentUrl,
                   title: cleanedTitle,
-                  pageData: pageData || null, // Store enhanced page data
+                  pageData: enhancedPageData, // Store enhanced page data with original href
                   originalUrl: checkRedirectDuplicates
                     ? originalUrl || url
                     : undefined, // Only track original if redirect checking enabled
@@ -2787,11 +2910,21 @@ async function crawlWebsite({
                       linkTitleMap.get(getCanonicalUrl(normalizedLink)) ||
                       linkTitleMap.get(getCanonicalUrl(normalizedLink) + "/");
 
+                    // Get original href from the originalHrefMap if available
+                    const originalHref =
+                      originalHrefMap.get(link) ||
+                      originalHrefMap.get(normalizedLink) ||
+                      originalHrefMap.get(getCanonicalUrl(normalizedLink)) ||
+                      originalHrefMap.get(
+                        getCanonicalUrl(normalizedLink) + "/"
+                      );
+
                     queue.push({
                       url: normalizedLink,
                       depth: item.depth + 1,
                       parentUrl: checkRedirectDuplicates ? actualUrl : url, // Use actual URL after redirects only if redirect checking enabled
                       linkTitle: linkTitle || null,
+                      originalHref: originalHref || null,
                     });
                   }
                 } catch (linkError) {
