@@ -123,6 +123,47 @@ You can find job IDs from:
 
 ## Troubleshooting
 
+### Black Screen / Page Not Rendering
+
+If you see a black screen with just the page title but no content:
+
+**This usually means you're on a headless server without proper display setup.**
+
+**Solution 1: Use Xvfb (Recommended for headless servers)**
+```bash
+# Install Xvfb if not already installed
+sudo apt-get install xvfb
+
+# Run with Xvfb
+xvfb-run -a node server/utils/browserInspector.js <url>
+```
+
+**Solution 2: Check if DISPLAY is set**
+```bash
+echo $DISPLAY
+# If empty, you need X11 forwarding or Xvfb
+```
+
+**Solution 3: Use X11 Forwarding (if you have GUI access)**
+```bash
+# From your local machine
+ssh -X user@your-server
+
+# Then run the inspector
+node server/utils/browserInspector.js <url>
+```
+
+**Solution 4: Wait longer for page load**
+The script now waits up to 60 seconds and uses `networkidle` to ensure pages fully load. If pages are still slow:
+- Check your network connection
+- The website might be very slow to load
+- Try the screenshot option ('s' key) to verify the page actually loaded
+
+**Solution 5: Check browser console for errors**
+- Press F12 in the browser window to open developer tools
+- Check the Console tab for JavaScript errors
+- Check the Network tab to see if resources are loading
+
 ### "Failed to launch browser" on server
 
 If you get this error on a headless server:
