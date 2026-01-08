@@ -1,0 +1,24 @@
+# Docker Compose override for running migrations
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.migrate.yml run --rm migrate
+
+services:
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: master-crawl-migrate
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: sitemap_generator
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./server:/app/server
+    command: node server/db/migrate.js run
+    profiles:
+      - migrate

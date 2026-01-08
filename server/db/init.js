@@ -50,16 +50,24 @@ async function queryWithRetry(text, params, retries = 3) {
   }
 }
 
-async function initDatabase() {
+async function initDatabase(runMigrations = false) {
   try {
-    // Read and execute schema
-    const schemaPath = path.join(__dirname, 'schema.sql');
-    const schema = fs.readFileSync(schemaPath, 'utf8');
-    
-    await pool.query(schema);
-    console.log('✅ Database schema initialized');
-    
-    return pool;
+    if (runMigrations) {
+      // Use migration system
+      const { runMigrations: executeMigrations } = require('./migrate');
+      await executeMigrations();
+      console.log('✅ Database migrations completed');
+      return pool;
+    } else {
+      // Legacy: Read and execute schema.sql (for backward compatibility)
+      const schemaPath = path.join(__dirname, 'schema.sql');
+      const schema = fs.readFileSync(schemaPath, 'utf8');
+      
+      await pool.query(schema);
+      console.log('✅ Database schema initialized');
+      
+      return pool;
+    }
   } catch (error) {
     // If tables already exist, that's okay
     if (error.code === '42P07' || error.code === '42710') {

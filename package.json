@@ -11,7 +11,12 @@
     "start": "node server/index.js",
     "docker:up": "docker-compose up -d",
     "docker:down": "docker-compose down",
-    "docker:build": "docker-compose build"
+    "docker:build": "docker-compose build",
+    "docker:migrate": "docker-compose exec backend node server/db/migrate.js run",
+    "docker:migrate:status": "docker-compose exec backend node server/db/migrate.js status",
+    "docker:migrate:standalone": "docker-compose -f docker-compose.yml -f docker-compose.migrate.yml run --rm migrate",
+    "migrate": "node server/db/migrate.js run",
+    "migrate:status": "node server/db/migrate.js status"
   },
   "keywords": ["sitemap", "crawler", "puppeteer", "ai", "saas"],
   "author": "",

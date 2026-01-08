@@ -35,7 +35,16 @@ app.get('/health', (req, res) => {
 // Initialize database and queue
 async function start() {
   try {
-    await initDatabase();
+    // Run migrations if enabled (set RUN_MIGRATIONS=true in environment)
+    if (process.env.RUN_MIGRATIONS === 'true') {
+      const { runMigrations } = require('./db/migrate');
+      console.log('🔄 Running database migrations...');
+      await runMigrations();
+    } else {
+      // Use legacy schema initialization
+      await initDatabase();
+    }
+    
     await initQueue();
     
     server.listen(PORT, () => {
