@@ -237,12 +237,16 @@ function generateJSONSitemap(pages) {
         }
       } catch {}
 
+      // Extract original href from page object (now comes from database)
+      const originalHref = page.originalHref || null;
+
       brokenLinks.push({
         url: page.url,
         errorType: errorType,
         suggestedTitle: suggestedTitle,
         parentUrl: page.parentUrl,
         depth: page.depth,
+        originalHref: originalHref,
         recommendation:
           errorType === "404 Not Found" ? "Redirect or Remove" : "Investigate",
       });
@@ -275,11 +279,15 @@ function generateJSONSitemap(pages) {
         }
       }
 
+      // Extract original href from page object (now comes from database)
+      const originalHref = page.originalHref || null;
+
       workingPages.push({
         url: page.url,
         title: cleanTitle,
         depth: page.depth,
         parentUrl: page.parentUrl,
+        originalHref: originalHref,
       });
     }
   });
