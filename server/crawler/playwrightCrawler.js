@@ -1134,6 +1134,23 @@ async function safeEvaluate(page, fn, fallback = null) {
 }
 
 /**
+ * Check if a URL is the root/homepage
+ */
+function isRootPage(url) {
+  try {
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname;
+    // Root page has empty pathname or just "/", and no hash (or only #)
+    return (
+      (pathname === "/" || pathname === "") &&
+      (!urlObj.hash || urlObj.hash === "" || urlObj.hash === "#")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Extract basic page data without using evaluate (for CSP-protected pages)
  * Uses Playwright's locator API instead of evaluate
  */
@@ -1142,19 +1159,27 @@ async function extractPageDataWithoutEval(page, url) {
     const links = [];
 
     // Extract title using locator (doesn't need eval)
-    // Priority: og:title > h1 > title tag (to avoid generic site titles)
+    // For root page: use title tag instead of og:title
+    // For other pages: Priority: og:title > h1 > title tag (to avoid generic site titles)
     let title = "Untitled";
+    const isRoot = isRootPage(url);
+
     try {
-      // Try og:title first (usually page-specific)
-      const ogTitleElement = page.locator('meta[property="og:title"]').first();
-      if ((await ogTitleElement.count()) > 0) {
-        const ogTitle = await ogTitleElement.getAttribute("content");
-        if (ogTitle && ogTitle.trim()) {
-          title = ogTitle.trim();
+      // For root page, skip og:title and use title tag directly
+      if (!isRoot) {
+        // Try og:title first (usually page-specific) - but not for root page
+        const ogTitleElement = page
+          .locator('meta[property="og:title"]')
+          .first();
+        if ((await ogTitleElement.count()) > 0) {
+          const ogTitle = await ogTitleElement.getAttribute("content");
+          if (ogTitle && ogTitle.trim()) {
+            title = ogTitle.trim();
+          }
         }
       }
 
-      // If no og:title, try h1 (main page heading)
+      // If no og:title (or root page), try h1 (main page heading)
       if (title === "Untitled") {
         const h1Element = page.locator("h1").first();
         if ((await h1Element.count()) > 0) {
@@ -1165,8 +1190,8 @@ async function extractPageDataWithoutEval(page, url) {
         }
       }
 
-      // Fallback to title tag
-      if (title === "Untitled") {
+      // For root page, prioritize title tag; for others, use as fallback
+      if (title === "Untitled" || (isRoot && title === "Untitled")) {
         const titleElement = page.locator("title").first();
         if ((await titleElement.count()) > 0) {
           title = (await titleElement.textContent()) || "Untitled";
@@ -1652,10 +1677,13 @@ async function crawlPageInternal(
     // Only extract from page if we don't have a link title
     if (title === "Untitled") {
       try {
+        // Check if this is the root page
+        const isRoot = isRootPage(url);
+
         // For hash routes, try to get route-specific content first
         const pageInfo = await safeEvaluate(
           page,
-          (isHashRoute) => {
+          (isHashRoute, isRootPage) => {
             // Try multiple selectors for title - prioritize page-specific content over generic site title
             const titleEl = document.querySelector("title");
             const h1El = document.querySelector("h1");
@@ -1675,33 +1703,48 @@ async function crawlPageInternal(
             const h1Text = h1El?.textContent?.trim() || "";
             const h2Text = h2El?.textContent?.trim() || "";
 
-            // Prefer page-specific titles (og:title, h1) over generic <title> tag
-            // Many sites have generic titles like "Company Name" in <title> but specific content in h1/og:title
+            // For root page: use title tag instead of og:title
+            // For other pages: prefer page-specific titles (og:title, h1) over generic <title> tag
             let titleText = "";
 
-            // First priority: og:title (usually page-specific)
-            if (ogTitle && ogTitle.length > 0 && ogTitle.length < 200) {
-              titleText = ogTitle;
-            }
-            // Second priority: twitter:title
-            else if (
-              twitterTitle &&
-              twitterTitle.length > 0 &&
-              twitterTitle.length < 200
-            ) {
-              titleText = twitterTitle;
-            }
-            // Third priority: h1 (usually the main page heading)
-            else if (h1Text && h1Text.length > 0 && h1Text.length < 200) {
-              titleText = h1Text;
-            }
-            // Fourth priority: <title> tag (may be generic)
-            else if (titleTag && titleTag.length > 0) {
-              titleText = titleTag;
-            }
-            // Fifth priority: h2
-            else if (h2Text && h2Text.length > 0 && h2Text.length < 200) {
-              titleText = h2Text;
+            if (isRootPage) {
+              // Root page: prioritize title tag
+              if (titleTag && titleTag.length > 0) {
+                titleText = titleTag;
+              }
+              // Fallback to h1 for root page
+              else if (h1Text && h1Text.length > 0 && h1Text.length < 200) {
+                titleText = h1Text;
+              }
+              // Fallback to h2 for root page
+              else if (h2Text && h2Text.length > 0 && h2Text.length < 200) {
+                titleText = h2Text;
+              }
+            } else {
+              // Non-root pages: First priority: og:title (usually page-specific)
+              if (ogTitle && ogTitle.length > 0 && ogTitle.length < 200) {
+                titleText = ogTitle;
+              }
+              // Second priority: twitter:title
+              else if (
+                twitterTitle &&
+                twitterTitle.length > 0 &&
+                twitterTitle.length < 200
+              ) {
+                titleText = twitterTitle;
+              }
+              // Third priority: h1 (usually the main page heading)
+              else if (h1Text && h1Text.length > 0 && h1Text.length < 200) {
+                titleText = h1Text;
+              }
+              // Fourth priority: <title> tag (may be generic)
+              else if (titleTag && titleTag.length > 0) {
+                titleText = titleTag;
+              }
+              // Fifth priority: h2
+              else if (h2Text && h2Text.length > 0 && h2Text.length < 200) {
+                titleText = h2Text;
+              }
             }
 
             // For hash routes, also check for route-specific content
@@ -1729,7 +1772,8 @@ async function crawlPageInternal(
             };
           },
           { title: "Untitled", hasContent: false, sources: {} },
-          isHashRoute
+          isHashRoute,
+          isRoot
         );
 
         title = pageInfo.title;
@@ -2642,10 +2686,26 @@ async function crawlWebsite({
         break;
       }
 
-      // Sort queue deterministically before processing to ensure consistent order
+      // Sort queue to preserve navigation structure
+      // Priority: 1) Depth 2) Links with titles (navigation) 3) Links without titles 4) URL
       queue.sort((a, b) => {
-        // Sort by depth first, then by URL
+        // Sort by depth first (BFS)
         if (a.depth !== b.depth) return a.depth - b.depth;
+
+        // Within same depth, prioritize links with titles (navigation links)
+        const hasTitleA = !!a.linkTitle;
+        const hasTitleB = !!b.linkTitle;
+
+        if (hasTitleA && !hasTitleB) return -1; // A has title, B doesn't - A comes first
+        if (!hasTitleA && hasTitleB) return 1; // B has title, A doesn't - B comes first
+
+        // Both have titles or both don't - sort by title (if available) or URL
+        if (hasTitleA && hasTitleB) {
+          const titleCompare = a.linkTitle.localeCompare(b.linkTitle);
+          if (titleCompare !== 0) return titleCompare;
+        }
+
+        // Fallback to URL sorting for deterministic order
         return a.url.localeCompare(b.url);
       });
 
@@ -2940,9 +3000,39 @@ async function crawlWebsite({
               : url;
 
             if (!error && links && links.length > 0) {
-              // Sort links deterministically before processing to ensure consistent order
+              // Sort links to preserve navigation structure
+              // Priority: 1) Links with titles (usually navigation) 2) Links without titles (footer/content)
+              // Within each group, sort by title (if available) or URL
               const sortedLinks = [...links].sort((a, b) => {
-                // Sort by URL to ensure deterministic order
+                // Helper to get link title from map (check multiple variations)
+                const getTitle = (url) => {
+                  return (
+                    linkTitleMap.get(url) ||
+                    linkTitleMap.get(normalizeUrl(url)) ||
+                    linkTitleMap.get(getCanonicalUrl(url)) ||
+                    linkTitleMap.get(getCanonicalUrl(url) + "/") ||
+                    null
+                  );
+                };
+
+                const titleA = getTitle(a);
+                const titleB = getTitle(b);
+
+                // Prioritize links with titles (navigation links) over links without titles
+                const hasTitleA = !!titleA;
+                const hasTitleB = !!titleB;
+
+                if (hasTitleA && !hasTitleB) return -1; // A has title, B doesn't - A comes first
+                if (!hasTitleA && hasTitleB) return 1; // B has title, A doesn't - B comes first
+
+                // Both have titles or both don't - sort by title (if available) or URL
+                if (hasTitleA && hasTitleB) {
+                  // Both have titles - sort by title
+                  const titleCompare = titleA.localeCompare(titleB);
+                  if (titleCompare !== 0) return titleCompare;
+                }
+
+                // Fallback to URL sorting for deterministic order
                 return a.localeCompare(b);
               });
 
