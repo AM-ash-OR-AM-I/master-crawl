@@ -1708,12 +1708,17 @@ async function crawlPageInternal(
     if (title === "Untitled") {
       try {
         // Check if this is the root page
+        // Use original URL to determine if it's root, even if it redirects
+        // This ensures root page title extraction works correctly for redirects
+        // e.g., https://www.chicago.gov/ -> https://www.chicago.gov/city/en.html
         const isRoot = isRootPage(url);
 
         // For hash routes, try to get route-specific content first
         // Also check actual page URL to handle redirects
         const actualPageUrl = page.url();
-        const isRootFromPage = isRootPage(actualPageUrl) || isRoot;
+        // If original URL was root, treat it as root even after redirect
+        // This ensures we use title tag priority for root pages that redirect
+        const isRootFromPage = isRoot || isRootPage(actualPageUrl);
         const pageInfo = await safeEvaluate(
           page,
           (isHashRoute, isRootPage) => {
@@ -1724,6 +1729,7 @@ async function crawlPageInternal(
               (!window.location.hash ||
                 window.location.hash === "" ||
                 window.location.hash === "#");
+            // If original URL was root (passed as isRootPage), treat as root even after redirect
             const isRootPageFinal = isRootPage || isActuallyRoot;
 
             // Try multiple selectors for title - prioritize page-specific content over generic site title
@@ -2222,7 +2228,10 @@ async function crawlPageInternal(
         console.warn(
           `⚠️ Using fallback extraction for ${finalUrl} (eval disabled)`
         );
-        const fallbackData = await extractPageDataWithoutEval(page, finalUrl);
+        // Use original URL (not finalUrl after redirect) to correctly identify root pages
+        // e.g., https://www.chicago.gov/ -> https://www.chicago.gov/city/en.html
+        // We want to treat it as root based on original URL, not redirected URL
+        const fallbackData = await extractPageDataWithoutEval(page, url);
         pageData = fallbackData.pageData || {
           links: [],
           linkTitles: new Map(),
