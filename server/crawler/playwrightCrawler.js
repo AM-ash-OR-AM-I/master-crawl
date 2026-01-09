@@ -2349,7 +2349,11 @@ async function crawlWebsite({
     },
   ];
   const pages = [];
-  const CONCURRENCY = 6;
+  // Pages per browser instance - configurable via PAGES_CONCURRENCY env var
+  // Higher values = more parallel pages per browser (uses more memory per browser)
+  // Lower values = fewer pages per browser (uses less memory, but may be slower)
+  // Recommended for 8GB VM: 8-10 pages per browser with 3 browser instances = 24-30 total concurrent pages
+  const CONCURRENCY = parseInt(process.env.PAGES_CONCURRENCY || "6");
   // Map to store link titles for discovered URLs
   const linkTitleMap = new Map();
   // Map to store original href attributes for discovered URLs

@@ -13,6 +13,9 @@ function JobDetails({ job, onClose }) {
   const [improving, setImproving] = useState(false);
   const [sitemapView, setSitemapView] = useState('tree'); // 'tree' or 'json'
   const [copied, setCopied] = useState({});
+  const [sitemap, setSitemap] = useState(null); // Cached sitemap
+  const [sitemapLoading, setSitemapLoading] = useState(false);
+  const [sitemapLoaded, setSitemapLoaded] = useState(false); // Track if sitemap has been loaded
 
   useEffect(() => {
     fetchDetails();
@@ -23,11 +26,50 @@ function JobDetails({ job, onClose }) {
       const response = await axios.get(`/api/crawl/${job.id}`);
       console.log('Job details response:', response.data);
       console.log('Prompts data:', response.data.prompts);
-      setDetails(response.data);
+      // Store details but don't store full sitemap tree - we'll lazy load it
+      // Keep sitemap metadata for overview tab, but not the full tree
+      const detailsData = { ...response.data };
+      if (detailsData.sitemap?.original_sitemap) {
+        // Extract just the metadata, not the full sitemap tree
+        const metadata = detailsData.sitemap.original_sitemap._crawlMeta;
+        detailsData.sitemap = {
+          ...detailsData.sitemap,
+          original_sitemap: metadata ? { _crawlMeta: metadata } : null, // Only store metadata
+        };
+      }
+      setDetails(detailsData);
     } catch (error) {
       console.error('Error fetching job details:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchSitemap = async () => {
+    // If already loaded and cached, don't fetch again
+    if (sitemapLoaded && sitemap) {
+      return;
+    }
+
+    setSitemapLoading(true);
+    try {
+      const response = await axios.get(`/api/crawl/${job.id}`);
+      if (response.data.sitemap?.original_sitemap) {
+        setSitemap(response.data.sitemap.original_sitemap);
+        setSitemapLoaded(true);
+      }
+    } catch (error) {
+      console.error('Error fetching sitemap:', error);
+    } finally {
+      setSitemapLoading(false);
+    }
+  };
+
+  const handleSitemapTabClick = () => {
+    setActiveTab('sitemap');
+    // Lazy load sitemap when tab is clicked
+    if (!sitemapLoaded) {
+      fetchSitemap();
     }
   };
 
@@ -139,7 +181,7 @@ function JobDetails({ job, onClose }) {
                 ? 'border-primary text-foreground'
                 : 'border-transparent text-muted-foreground hover:text-foreground'
             )}
-            onClick={() => setActiveTab('sitemap')}
+            onClick={handleSitemapTabClick}
           >
             Sitemap
           </button>
@@ -544,7 +586,30 @@ function JobDetails({ job, onClose }) {
 
           {activeTab === 'sitemap' && (
             <div className="space-y-4">
-              {details.sitemap?.original_sitemap ? (
+              {sitemapLoading ? (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <svg
+                    className="h-8 w-8 animate-spin text-primary mb-4"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    ></circle>
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
+                  </svg>
+                  <p className="text-muted-foreground">Loading sitemap...</p>
+                </div>
+              ) : sitemap ? (
                 <>
                   <div className="flex items-center justify-between">
                     <div className="flex gap-2">
@@ -591,16 +656,12 @@ function JobDetails({ job, onClose }) {
                     </div>
                   </div>
                   {sitemapView === 'tree' ? (
-                    <SitemapTree sitemap={details.sitemap.original_sitemap} />
+                    <SitemapTree sitemap={sitemap} />
                   ) : (
                     <Card>
                       <CardContent className="p-4">
                         <pre className="text-xs overflow-auto max-h-96 bg-muted p-4 rounded">
-                          {JSON.stringify(
-                            details.sitemap.original_sitemap,
-                            null,
-                            2
-                          )}
+                          {JSON.stringify(sitemap, null, 2)}
                         </pre>
                       </CardContent>
                     </Card>
