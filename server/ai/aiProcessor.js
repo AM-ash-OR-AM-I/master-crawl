@@ -473,7 +473,7 @@ Remember: Do NOT invent new content. Only restructure existing paths.`;
           content: userPrompt,
         },
       ],
-      max_tokens: MAX_OUTPUT_TOKENS * 2, // Allow more tokens for full sitemap
+      max_completion_tokens: MAX_OUTPUT_TOKENS * 2, // Allow more tokens for full sitemap
       temperature: 0.3,
     });
 
