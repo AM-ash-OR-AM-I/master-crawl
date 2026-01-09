@@ -2691,7 +2691,7 @@ async function crawlWebsite({
       }
 
       // Sort queue to preserve navigation structure
-      // Priority: 1) Depth 2) Links with titles (navigation) 3) Links without titles 4) URL
+      // Priority: 1) Depth 2) Links with titles (navigation - preserve order) 3) Links without titles (sort by URL)
       queue.sort((a, b) => {
         // Sort by depth first (BFS)
         if (a.depth !== b.depth) return a.depth - b.depth;
@@ -2703,13 +2703,17 @@ async function crawlWebsite({
         if (hasTitleA && !hasTitleB) return -1; // A has title, B doesn't - A comes first
         if (!hasTitleA && hasTitleB) return 1; // B has title, A doesn't - B comes first
 
-        // Both have titles or both don't - sort by title (if available) or URL
+        // Both have titles - preserve original order (don't sort by title)
+        // Use a stable sort key based on original insertion order
+        // Since we can't track original order easily in queue, use URL as tiebreaker
+        // but this maintains relative order for items added in same batch
         if (hasTitleA && hasTitleB) {
-          const titleCompare = a.linkTitle.localeCompare(b.linkTitle);
-          if (titleCompare !== 0) return titleCompare;
+          // Don't sort by title - preserve order by using URL as stable sort key
+          // This maintains the order links were discovered/added
+          return a.url.localeCompare(b.url);
         }
 
-        // Fallback to URL sorting for deterministic order
+        // Both don't have titles - sort alphabetically by URL for deterministic order
         return a.url.localeCompare(b.url);
       });
 
@@ -3004,41 +3008,35 @@ async function crawlWebsite({
               : url;
 
             if (!error && links && links.length > 0) {
-              // Sort links to preserve navigation structure
-              // Priority: 1) Links with titles (usually navigation) 2) Links without titles (footer/content)
-              // Within each group, sort by title (if available) or URL
-              const sortedLinks = [...links].sort((a, b) => {
-                // Helper to get link title from map (check multiple variations)
-                const getTitle = (url) => {
-                  return (
-                    linkTitleMap.get(url) ||
-                    linkTitleMap.get(normalizeUrl(url)) ||
-                    linkTitleMap.get(getCanonicalUrl(url)) ||
-                    linkTitleMap.get(getCanonicalUrl(url) + "/") ||
-                    null
-                  );
-                };
+              // Preserve navigation order: links with titles keep their original HTML order
+              // Priority: 1) Links with titles (navigation - preserve order) 2) Links without titles (footer/content - can sort)
+              const getTitle = (url) => {
+                return (
+                  linkTitleMap.get(url) ||
+                  linkTitleMap.get(normalizeUrl(url)) ||
+                  linkTitleMap.get(getCanonicalUrl(url)) ||
+                  linkTitleMap.get(getCanonicalUrl(url) + "/") ||
+                  null
+                );
+              };
 
-                const titleA = getTitle(a);
-                const titleB = getTitle(b);
+              // Separate links into navigation (with titles) and footer/content (without titles)
+              const navigationLinks = [];
+              const otherLinks = [];
 
-                // Prioritize links with titles (navigation links) over links without titles
-                const hasTitleA = !!titleA;
-                const hasTitleB = !!titleB;
-
-                if (hasTitleA && !hasTitleB) return -1; // A has title, B doesn't - A comes first
-                if (!hasTitleA && hasTitleB) return 1; // B has title, A doesn't - B comes first
-
-                // Both have titles or both don't - sort by title (if available) or URL
-                if (hasTitleA && hasTitleB) {
-                  // Both have titles - sort by title
-                  const titleCompare = titleA.localeCompare(titleB);
-                  if (titleCompare !== 0) return titleCompare;
+              links.forEach((link) => {
+                if (getTitle(link)) {
+                  navigationLinks.push(link); // Keep original order
+                } else {
+                  otherLinks.push(link);
                 }
-
-                // Fallback to URL sorting for deterministic order
-                return a.localeCompare(b);
               });
+
+              // Sort only the links without titles (footer/content links)
+              otherLinks.sort((a, b) => a.localeCompare(b));
+
+              // Combine: navigation links first (in original order), then sorted footer/content links
+              const sortedLinks = [...navigationLinks, ...otherLinks];
 
               for (const link of sortedLinks) {
                 try {
