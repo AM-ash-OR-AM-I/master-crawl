@@ -175,7 +175,7 @@ function NewCrawlForm({ onSubmit }) {
                   <input
                     type="range"
                     min="1"
-                    max="10000"
+                    max="12000"
                     step="100"
                     value={maxPages}
                     onChange={(e) => setMaxPages(parseInt(e.target.value))}
