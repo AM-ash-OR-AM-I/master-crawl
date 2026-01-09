@@ -664,10 +664,11 @@ function generateExcelSitemap(pages, baseUrl) {
  * Get sitemap in requested format
  */
 async function getSitemap(jobId, format = "json") {
-  // Order by depth first (for BFS), then by crawled_at to preserve HTML discovery order
-  // This maintains the order pages were found in HTML (top to bottom)
+  // Order by depth first (for BFS), then by sequence to preserve HTML discovery order
+  // Sequence number maintains the order pages were found in HTML (top to bottom)
+  // Fallback to crawled_at for backward compatibility with old data
   const pagesResult = await pool.query(
-    "SELECT url, title, depth, parent_url, original_href FROM pages WHERE job_id = $1 ORDER BY depth, crawled_at",
+    "SELECT url, title, depth, parent_url, original_href FROM pages WHERE job_id = $1 ORDER BY depth, COALESCE(sequence, 999999), crawled_at",
     [jobId]
   );
 

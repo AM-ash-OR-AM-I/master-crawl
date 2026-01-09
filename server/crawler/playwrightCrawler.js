@@ -1159,15 +1159,41 @@ async function extractPageDataWithoutEval(page, url) {
     const links = [];
 
     // Extract title using locator (doesn't need eval)
-    // For root page: use title tag instead of og:title
+    // For root page: Priority: <title> tag > og:title > "root"
     // For other pages: Priority: og:title > h1 > title tag (to avoid generic site titles)
     let title = "Untitled";
     const isRoot = isRootPage(url);
 
     try {
-      // For root page, skip og:title and use title tag directly
-      if (!isRoot) {
-        // Try og:title first (usually page-specific) - but not for root page
+      if (isRoot) {
+        // Root page: First try <title> tag
+        const titleElement = page.locator("title").first();
+        if ((await titleElement.count()) > 0) {
+          const titleText = await titleElement.textContent();
+          if (titleText && titleText.trim()) {
+            title = titleText.trim();
+          }
+        }
+
+        // If no title tag, try og:title as fallback
+        if (title === "Untitled") {
+          const ogTitleElement = page
+            .locator('meta[property="og:title"]')
+            .first();
+          if ((await ogTitleElement.count()) > 0) {
+            const ogTitle = await ogTitleElement.getAttribute("content");
+            if (ogTitle && ogTitle.trim()) {
+              title = ogTitle.trim();
+            }
+          }
+        }
+
+        // If neither found, use "root"
+        if (title === "Untitled") {
+          title = "root";
+        }
+      } else {
+        // Non-root pages: Try og:title first (usually page-specific)
         const ogTitleElement = page
           .locator('meta[property="og:title"]')
           .first();
@@ -1177,42 +1203,42 @@ async function extractPageDataWithoutEval(page, url) {
             title = ogTitle.trim();
           }
         }
-      }
 
-      // If no og:title (or root page), try h1 (main page heading)
-      if (title === "Untitled") {
-        const h1Element = page.locator("h1").first();
-        if ((await h1Element.count()) > 0) {
-          const h1Text = await h1Element.textContent();
-          if (h1Text && h1Text.trim() && h1Text.trim().length < 200) {
-            title = h1Text.trim();
+        // If no og:title, try h1 (main page heading)
+        if (title === "Untitled") {
+          const h1Element = page.locator("h1").first();
+          if ((await h1Element.count()) > 0) {
+            const h1Text = await h1Element.textContent();
+            if (h1Text && h1Text.trim() && h1Text.trim().length < 200) {
+              title = h1Text.trim();
+            }
           }
         }
-      }
 
-      // For root page, prioritize title tag; for others, use as fallback
-      if (title === "Untitled" || (isRoot && title === "Untitled")) {
-        const titleElement = page.locator("title").first();
-        if ((await titleElement.count()) > 0) {
-          title = (await titleElement.textContent()) || "Untitled";
-        }
-      }
-
-      // Final fallback: generate from URL
-      if (title === "Untitled" || title.length < 3) {
-        try {
-          const urlObj = new URL(url);
-          const pathParts = urlObj.pathname.split("/").filter((p) => p);
-          if (pathParts.length > 0) {
-            title = pathParts[pathParts.length - 1]
-              .replace(/-/g, " ")
-              .replace(/_/g, " ")
-              .replace(/\b\w/g, (l) => l.toUpperCase());
-          } else {
-            title = "Home";
+        // Use title tag as fallback
+        if (title === "Untitled") {
+          const titleElement = page.locator("title").first();
+          if ((await titleElement.count()) > 0) {
+            title = (await titleElement.textContent()) || "Untitled";
           }
-        } catch {
-          title = "Page";
+        }
+
+        // Final fallback: generate from URL
+        if (title === "Untitled" || title.length < 3) {
+          try {
+            const urlObj = new URL(url);
+            const pathParts = urlObj.pathname.split("/").filter((p) => p);
+            if (pathParts.length > 0) {
+              title = pathParts[pathParts.length - 1]
+                .replace(/-/g, " ")
+                .replace(/_/g, " ")
+                .replace(/\b\w/g, (l) => l.toUpperCase());
+            } else {
+              title = "Home";
+            }
+          } catch {
+            title = "Page";
+          }
         }
       }
     } catch {}
@@ -1703,22 +1729,22 @@ async function crawlPageInternal(
             const h1Text = h1El?.textContent?.trim() || "";
             const h2Text = h2El?.textContent?.trim() || "";
 
-            // For root page: use title tag instead of og:title
+            // For root page: Priority: <title> tag > og:title > "root"
             // For other pages: prefer page-specific titles (og:title, h1) over generic <title> tag
             let titleText = "";
 
             if (isRootPage) {
-              // Root page: prioritize title tag
+              // Root page: First try <title> tag
               if (titleTag && titleTag.length > 0) {
                 titleText = titleTag;
               }
-              // Fallback to h1 for root page
-              else if (h1Text && h1Text.length > 0 && h1Text.length < 200) {
-                titleText = h1Text;
+              // Fallback to og:title for root page
+              else if (ogTitle && ogTitle.length > 0 && ogTitle.length < 200) {
+                titleText = ogTitle;
               }
-              // Fallback to h2 for root page
-              else if (h2Text && h2Text.length > 0 && h2Text.length < 200) {
-                titleText = h2Text;
+              // If neither found, use "root"
+              else {
+                titleText = "root";
               }
             } else {
               // Non-root pages: First priority: og:title (usually page-specific)
@@ -2936,8 +2962,9 @@ async function crawlWebsite({
                 null;
 
               // Use ON CONFLICT to handle cases where redirect leads to already-crawled URL
+              // Include sequence number to preserve HTML discovery order
               const pageResult = await queryWithRetry(
-                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code, original_href) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
+                "INSERT INTO pages (job_id, url, depth, parent_url, title, status_code, original_href, sequence) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (job_id, url) DO NOTHING RETURNING id",
                 [
                   jobId,
                   urlToStore, // Store final URL if redirect checking enabled, otherwise original URL
@@ -2946,6 +2973,7 @@ async function crawlWebsite({
                   finalTitle,
                   finalStatusCode,
                   pageOriginalHref,
+                  item.sequence || null, // Preserve HTML discovery order
                 ]
               );
 

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS pages (
   parent_url TEXT,
   title TEXT,
   status_code INTEGER,
+  sequence INTEGER,
   crawled_at TIMESTAMP NOT NULL DEFAULT NOW(),
   UNIQUE(job_id, url)
 );
@@ -96,6 +97,7 @@ CREATE INDEX IF NOT EXISTS idx_crawl_jobs_status ON crawl_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_crawl_jobs_domain ON crawl_jobs(domain);
 CREATE INDEX IF NOT EXISTS idx_pages_job_id ON pages(job_id);
 CREATE INDEX IF NOT EXISTS idx_pages_url ON pages(url);
+CREATE INDEX IF NOT EXISTS idx_pages_job_depth_sequence ON pages(job_id, depth, sequence);
 CREATE INDEX IF NOT EXISTS idx_ai_recommendations_job_id ON ai_recommendations(job_id);
 CREATE INDEX IF NOT EXISTS idx_sitemaps_job_id ON sitemaps(job_id);
 CREATE INDEX IF NOT EXISTS idx_ai_prompts_job_id ON ai_prompts(job_id);
