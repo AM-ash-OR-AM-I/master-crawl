@@ -1166,16 +1166,20 @@ async function extractPageDataWithoutEval(page, url) {
 
     try {
       if (isRoot) {
-        // Root page: First try <title> tag
+        // Root page: First try <title> tag (must be non-empty)
         const titleElement = page.locator("title").first();
         if ((await titleElement.count()) > 0) {
           const titleText = await titleElement.textContent();
-          if (titleText && titleText.trim()) {
+          if (
+            titleText &&
+            titleText.trim() &&
+            titleText.trim() !== "Untitled"
+          ) {
             title = titleText.trim();
           }
         }
 
-        // If no title tag, try og:title as fallback
+        // If no title tag or title is still "Untitled", try og:title as fallback
         if (title === "Untitled") {
           const ogTitleElement = page
             .locator('meta[property="og:title"]')
@@ -1707,9 +1711,21 @@ async function crawlPageInternal(
         const isRoot = isRootPage(url);
 
         // For hash routes, try to get route-specific content first
+        // Also check actual page URL to handle redirects
+        const actualPageUrl = page.url();
+        const isRootFromPage = isRootPage(actualPageUrl) || isRoot;
         const pageInfo = await safeEvaluate(
           page,
           (isHashRoute, isRootPage) => {
+            // Also check window.location to handle redirects
+            const currentPath = window.location.pathname;
+            const isActuallyRoot =
+              (currentPath === "/" || currentPath === "") &&
+              (!window.location.hash ||
+                window.location.hash === "" ||
+                window.location.hash === "#");
+            const isRootPageFinal = isRootPage || isActuallyRoot;
+
             // Try multiple selectors for title - prioritize page-specific content over generic site title
             const titleEl = document.querySelector("title");
             const h1El = document.querySelector("h1");
@@ -1722,7 +1738,17 @@ async function crawlPageInternal(
             );
 
             // Get all possible title sources
-            const titleTag = titleEl?.textContent?.trim() || "";
+            // For title tag, also try innerText and innerHTML as fallbacks
+            let titleTag = "";
+            if (titleEl) {
+              titleTag =
+                titleEl.textContent?.trim() ||
+                titleEl.innerText?.trim() ||
+                (titleEl.innerHTML
+                  ? titleEl.innerHTML.replace(/<[^>]*>/g, "").trim()
+                  : "") ||
+                "";
+            }
             const ogTitle = metaTitle?.getAttribute("content")?.trim() || "";
             const twitterTitle =
               metaTwitterTitle?.getAttribute("content")?.trim() || "";
@@ -1733,12 +1759,20 @@ async function crawlPageInternal(
             // For other pages: prefer page-specific titles (og:title, h1) over generic <title> tag
             let titleText = "";
 
-            if (isRootPage) {
-              // Root page: First try <title> tag
-              if (titleTag && titleTag.length > 0) {
+            if (isRootPageFinal) {
+              // Root page: First try <title> tag (must be non-empty and meaningful)
+              // Ensure title tag has actual content (not just whitespace or generic text)
+              if (
+                titleTag &&
+                titleTag.length > 0 &&
+                titleTag.trim().length > 0 &&
+                titleTag !== "Untitled" &&
+                titleTag.toLowerCase() !== "home" &&
+                titleTag.toLowerCase() !== "index"
+              ) {
                 titleText = titleTag;
               }
-              // Fallback to og:title for root page
+              // Fallback to og:title for root page only if title tag is truly empty or invalid
               else if (ogTitle && ogTitle.length > 0 && ogTitle.length < 200) {
                 titleText = ogTitle;
               }
@@ -1799,7 +1833,7 @@ async function crawlPageInternal(
           },
           { title: "Untitled", hasContent: false, sources: {} },
           isHashRoute,
-          isRoot
+          isRootFromPage
         );
 
         title = pageInfo.title;
