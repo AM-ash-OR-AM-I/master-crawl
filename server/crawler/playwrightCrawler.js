@@ -2179,10 +2179,17 @@ async function crawlPageInternal(
           ...paginatedLinks,
           // Fragment links removed - they're not separate pages
         ];
-        // Sort links deterministically to ensure consistent discovery order
-        links = [...new Set(allExtractedLinks)].sort((a, b) =>
-          a.localeCompare(b)
-        ); // Remove duplicates and sort
+        // Remove duplicates while preserving HTML discovery order (top to bottom)
+        // Use a Map to preserve insertion order while removing duplicates
+        const uniqueLinks = [];
+        const seenLinks = new Set();
+        for (const link of allExtractedLinks) {
+          if (!seenLinks.has(link)) {
+            seenLinks.add(link);
+            uniqueLinks.push(link);
+          }
+        }
+        links = uniqueLinks; // Preserve HTML order, no sorting
 
         // Store link titles in the global map
         if (pageData.linkTitles) {
@@ -2339,6 +2346,7 @@ async function crawlWebsite({
   const baseUrl = domain.startsWith("http") ? domain : `https://${domain}`;
 
   const visited = new Set();
+  let queueSequence = 0; // Track insertion order to preserve HTML discovery order
   const queue = [
     {
       url: baseUrl,
@@ -2346,6 +2354,7 @@ async function crawlWebsite({
       parentUrl: null,
       linkTitle: null,
       originalHref: null,
+      sequence: queueSequence++, // Track insertion order
     },
   ];
   const pages = [];
@@ -2496,6 +2505,7 @@ async function crawlWebsite({
               parentUrl: baseUrl,
               fromSitemap: true,
               sampleCrawl: true, // Mark as sample crawl for content extraction
+              sequence: queueSequence++, // Track insertion order to preserve HTML order
             });
           }
         }
@@ -2520,6 +2530,7 @@ async function crawlWebsite({
               depth: 1,
               parentUrl: baseUrl,
               fromSitemap: true,
+              sequence: queueSequence++, // Track insertion order to preserve HTML order
             });
           }
         }
@@ -2691,10 +2702,12 @@ async function crawlWebsite({
       }
 
       // Sort queue only by depth for BFS (breadth-first search)
-      // Within same depth, preserve the order links were added (HTML order)
+      // Within same depth, preserve the order links were added (HTML order) using sequence number
       queue.sort((a, b) => {
-        // Only sort by depth - preserve insertion order within same depth
-        return a.depth - b.depth;
+        // Sort by depth first
+        if (a.depth !== b.depth) return a.depth - b.depth;
+        // Within same depth, preserve insertion order (HTML discovery order)
+        return (a.sequence || 0) - (b.sequence || 0);
       });
 
       const batch = queue.splice(0, CONCURRENCY);
@@ -3079,6 +3092,7 @@ async function crawlWebsite({
                       parentUrl: checkRedirectDuplicates ? actualUrl : url, // Use actual URL after redirects only if redirect checking enabled
                       linkTitle: linkTitle || null,
                       originalHref: originalHref || null,
+                      sequence: queueSequence++, // Track insertion order to preserve HTML order
                     });
                   }
                 } catch (linkError) {
