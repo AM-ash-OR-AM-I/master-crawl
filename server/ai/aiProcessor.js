@@ -414,7 +414,7 @@ async function generateImprovedSitemap(
   const userPrompt = `You are analyzing a website sitemap to provide SEO recommendations.
 
 INPUTS:
-1. Current sitemap tree (JSON)
+1. Current sitemap tree (JSON) - Note: If analyzing from exported JSON, check the \`issues.brokenLinks\` section for broken links that need fixes
 2. Detected structural issues (JSON)
 
 SITE CONTEXT:
@@ -432,9 +432,14 @@ ${JSON.stringify(issuesFormatted, null, 2)}
 
 TASKS:
 1. Analyze the current sitemap structure
-2. Identify URLs that should be redirected (301) to better paths
-3. Identify paths that should be set to noindex
-4. Provide recommendations for restructuring
+2. If the sitemap data includes an \`issues.brokenLinks\` section:
+   - Review each broken link's errorType and recommendation
+   - For 404 errors with "Redirect or Remove": suggest redirects to appropriate pages or mark for removal in redirect_map
+   - For other error types: suggest investigation actions
+   - Include broken link fixes in your redirect_map recommendations
+3. Identify URLs that should be redirected (301) to better paths
+4. Identify paths that should be set to noindex
+5. Provide recommendations for restructuring
 
 OUTPUT FORMAT:
 You MUST respond with ONLY valid JSON in the following format:
@@ -463,11 +468,14 @@ You MUST respond with ONLY valid JSON in the following format:
 CRITICAL REQUIREMENTS:
 - Respond with ONLY the JSON object, wrapped in \`\`\`json code blocks
 - Include redirect_map array with all recommended redirects
+  - MUST include redirects for broken links from \`issues.brokenLinks\` section (especially 404 errors)
+  - Use the \`recommendation\` field from broken links to determine action (redirect or remove)
 - Include indexing_rules array with all recommended noindex rules
 - Each redirect must have: from, to, status (301), and reason
+  - For broken links: reason should reference the errorType (e.g., "404 Not Found - redirecting to parent page")
 - Each indexing rule must have: path, action ("noindex"), and reason
 - Do NOT invent new content - only recommend changes to existing URLs
-- Focus on addressing the structural issues provided
+- Focus on addressing the structural issues provided AND broken links from the \`issues.brokenLinks\` section
 
 Remember: Do NOT invent new content. Only restructure existing paths.`;
 
@@ -661,6 +669,8 @@ You MUST generate downloadable files to avoid truncation, partial output, or bro
 
 INPUTS:
 1. Current sitemap tree (JSON) - attached as sitemap.json file
+   - The file contains a \`pages\` array with all working pages
+   - The file contains an \`issues\` section with \`brokenLinks\` array
 2. Detected structural issues (JSON)
 
 SITE CONTEXT:
@@ -672,13 +682,18 @@ SITE CONTEXT:
 
 TASKS:
 1. Analyze the current sitemap structure and identify improvements
-2. Ensure depth ≤ ${maxDepth}
-3. Consolidate flat or fragmented sections into logical hubs
-4. Return a redirect map (301) for all moved paths
-5. List index/noindex recommendations
-6. Explain structural changes briefly
+2. Review the \`issues.brokenLinks\` section in the attached sitemap.json file:
+   - Each broken link includes: url, errorType (404, 403, 500, Timeout, etc.), parentUrl, depth, originalHref, and recommendation
+   - Use the \`recommendation\` field (e.g., "Redirect or Remove", "Investigate") to suggest appropriate fixes
+   - For 404 errors with "Redirect or Remove" recommendation: suggest redirects to appropriate pages or mark for removal
+   - For other error types: suggest investigation and appropriate actions
+3. Ensure depth ≤ ${maxDepth}
+4. Consolidate flat or fragmented sections into logical hubs
+5. Return a redirect map (301) for all moved paths AND broken links that should be redirected
+6. List index/noindex recommendations
+7. Explain structural changes briefly, including how broken links are addressed
 
-NOTE: The sitemap.json file is attached to this conversation. Please analyze the structure from the attached file.
+NOTE: The sitemap.json file is attached to this conversation. Please analyze the structure from the attached file, paying special attention to the \`issues.brokenLinks\` section to suggest fixes for broken links.
 
 STRUCTURAL ISSUES:
 ${JSON.stringify(issuesFormatted, null, 2)}
@@ -699,6 +714,7 @@ CRITICAL VALIDATION RULES:
 - Excel file must include all URLs with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes
 - Use code blocks with language tags: \`\`\`csv or \`\`\`json for the Excel data
 - Fully expand all tree branches - no collapsing, no placeholders
+- Address broken links from \`issues.brokenLinks\` section: include redirects in redirect_map or mark for removal in Notes column
 
 ALTERNATIVE: If file generation is not possible, use CHUNKED RESPONSE mode:
 - Provide new_sitemap.xlsx data in chunks (CSV format or structured JSON with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes)
