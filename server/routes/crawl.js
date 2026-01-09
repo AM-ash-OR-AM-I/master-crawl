@@ -78,10 +78,13 @@ router.post("/", async (req, res) => {
 /**
  * GET /api/crawl/:jobId
  * Get crawl job details
+ * Query params:
+ *   - includeSitemap: if true, includes full sitemap (default: false for performance)
  */
 router.get("/:jobId", async (req, res) => {
   try {
     const { jobId } = req.params;
+    const includeSitemap = req.query.includeSitemap === "true";
 
     const jobResult = await pool.query(
       "SELECT * FROM crawl_jobs WHERE id = $1",
@@ -100,11 +103,43 @@ router.get("/:jobId", async (req, res) => {
       [jobId]
     );
 
-    // Get sitemap
-    const sitemapResult = await pool.query(
-      "SELECT original_sitemap FROM sitemaps WHERE job_id = $1",
-      [jobId]
-    );
+    // Get sitemap only if requested (for performance)
+    let sitemapResult = null;
+    let sitemapData = null;
+    if (includeSitemap) {
+      sitemapResult = await pool.query(
+        "SELECT original_sitemap FROM sitemaps WHERE job_id = $1",
+        [jobId]
+      );
+      if (sitemapResult.rows[0]) {
+        sitemapData = {
+          original_sitemap: sitemapResult.rows[0].original_sitemap,
+        };
+      }
+    } else {
+      // Even if not including full sitemap, check if it exists and get metadata only
+      sitemapResult = await pool.query(
+        "SELECT original_sitemap FROM sitemaps WHERE job_id = $1",
+        [jobId]
+      );
+      if (sitemapResult.rows[0] && sitemapResult.rows[0].original_sitemap) {
+        // Parse to extract just metadata, not the full tree
+        try {
+          const fullSitemap = JSON.parse(
+            sitemapResult.rows[0].original_sitemap
+          );
+          // Only include metadata, not the full tree
+          sitemapData = {
+            original_sitemap: fullSitemap._crawlMeta
+              ? { _crawlMeta: fullSitemap._crawlMeta }
+              : null,
+          };
+        } catch (e) {
+          // If parsing fails, just indicate sitemap exists
+          sitemapData = { original_sitemap: null };
+        }
+      }
+    }
 
     // Get recommendations
     const recsResult = await pool.query(
@@ -112,9 +147,9 @@ router.get("/:jobId", async (req, res) => {
       [jobId]
     );
 
-    // Generate prompts with sitemap data (if sitemap exists)
+    // Generate prompts with sitemap data (if sitemap exists and is included)
     let prompts = null;
-    if (sitemapResult.rows[0] && sitemapResult.rows[0].original_sitemap) {
+    if (includeSitemap && sitemapResult?.rows[0]?.original_sitemap) {
       try {
         // Try to get canonical tree and issues if available
         // For now, just pass the sitemap - the function will handle conversion
@@ -133,9 +168,7 @@ router.get("/:jobId", async (req, res) => {
     const responseData = {
       ...job,
       pagesCount: parseInt(pagesResult.rows[0].count),
-      sitemap: sitemapResult.rows[0]
-        ? { original_sitemap: sitemapResult.rows[0].original_sitemap }
-        : null,
+      sitemap: sitemapData,
       recommendations: recsResult.rows || [],
     };
 
@@ -483,11 +516,9 @@ router.post("/:jobId/improve", async (req, res) => {
     const job = jobResult.rows[0];
 
     if (job.status !== "COMPLETED" && job.status !== "PROCESSING") {
-      return res
-        .status(400)
-        .json({
-          error: "Job must be completed before AI improvement can be applied",
-        });
+      return res.status(400).json({
+        error: "Job must be completed before AI improvement can be applied",
+      });
     }
 
     // Get sitemap

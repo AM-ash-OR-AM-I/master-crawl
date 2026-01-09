@@ -23,21 +23,11 @@ function JobDetails({ job, onClose }) {
 
   const fetchDetails = async () => {
     try {
-      const response = await axios.get(`/api/crawl/${job.id}`);
+      // Don't include sitemap in initial fetch for faster loading
+      const response = await axios.get(`/api/crawl/${job.id}?includeSitemap=false`);
       console.log('Job details response:', response.data);
       console.log('Prompts data:', response.data.prompts);
-      // Store details but don't store full sitemap tree - we'll lazy load it
-      // Keep sitemap metadata for overview tab, but not the full tree
-      const detailsData = { ...response.data };
-      if (detailsData.sitemap?.original_sitemap) {
-        // Extract just the metadata, not the full sitemap tree
-        const metadata = detailsData.sitemap.original_sitemap._crawlMeta;
-        detailsData.sitemap = {
-          ...detailsData.sitemap,
-          original_sitemap: metadata ? { _crawlMeta: metadata } : null, // Only store metadata
-        };
-      }
-      setDetails(detailsData);
+      setDetails(response.data);
     } catch (error) {
       console.error('Error fetching job details:', error);
     } finally {
@@ -53,7 +43,8 @@ function JobDetails({ job, onClose }) {
 
     setSitemapLoading(true);
     try {
-      const response = await axios.get(`/api/crawl/${job.id}`);
+      // Explicitly request sitemap with includeSitemap=true
+      const response = await axios.get(`/api/crawl/${job.id}?includeSitemap=true`);
       if (response.data.sitemap?.original_sitemap) {
         setSitemap(response.data.sitemap.original_sitemap);
         setSitemapLoaded(true);
