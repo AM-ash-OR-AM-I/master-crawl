@@ -146,14 +146,36 @@ const crawlWorker = new Worker(
       ]);
       await broadcastStatusUpdate(jobId);
 
+      // Retrieve pages from database ordered by sequence to preserve HTML discovery order
+      // This ensures the tree view shows pages in the correct order
+      const pagesResult = await queryWithRetry(
+        "SELECT url, title, depth, parent_url, original_href, sequence FROM pages WHERE job_id = $1 ORDER BY depth, COALESCE(sequence, 999999), crawled_at",
+        [jobId]
+      );
+
+      // Convert database rows to page objects with sequence
+      const orderedPages = pagesResult.rows.map((row) => ({
+        url: row.url,
+        title: row.title,
+        depth: row.depth,
+        parentUrl: row.parent_url,
+        originalHref: row.original_href || null,
+        sequence: row.sequence || null,
+      }));
+
       // Build sitemap structure (legacy format for backward compatibility)
-      const legacySitemap = buildSitemapStructure(pages);
+      // Use ordered pages from database to preserve sequence order
+      const legacySitemap = buildSitemapStructure(orderedPages);
 
       // Build canonical sitemap tree (new format)
-      const canonicalTree = buildCanonicalSitemapTree(pages);
+      // Use ordered pages from database to preserve sequence order
+      const canonicalTree = buildCanonicalSitemapTree(orderedPages);
 
       // Detect structural issues
-      const structuralIssues = detectStructuralIssues(canonicalTree, pages);
+      const structuralIssues = detectStructuralIssues(
+        canonicalTree,
+        orderedPages
+      );
 
       // Add crawl errors/warnings to the sitemap metadata
       if (legacySitemap) {
@@ -562,6 +584,8 @@ function buildSitemapStructure(pages) {
 
   for (const page of pages) {
     const node = pageMap.get(page.url);
+    // Store sequence for sorting children later
+    node.sequence = page.sequence || null;
 
     // If page has a parent and parent exists in our map, add as child
     if (page.parentUrl && pageMap.has(page.parentUrl)) {
@@ -576,8 +600,30 @@ function buildSitemapStructure(pages) {
     }
   }
 
-  // Don't sort - preserve HTML discovery order
-  // Children are already in the order they were discovered during crawl
+  // Sort children by sequence to preserve HTML discovery order
+  // This ensures the tree view shows pages in the correct order
+  function sortChildrenBySequence(node) {
+    if (node.children && node.children.length > 0) {
+      // Sort children by sequence (null sequences go last)
+      node.children.sort((a, b) => {
+        const seqA = a.sequence ?? 999999;
+        const seqB = b.sequence ?? 999999;
+        return seqA - seqB;
+      });
+      // Recursively sort all descendants
+      node.children.forEach((child) => sortChildrenBySequence(child));
+    }
+  }
+
+  // Sort root nodes by sequence
+  rootNodes.sort((a, b) => {
+    const seqA = a.sequence ?? 999999;
+    const seqB = b.sequence ?? 999999;
+    return seqA - seqB;
+  });
+
+  // Sort all children recursively
+  rootNodes.forEach((node) => sortChildrenBySequence(node));
 
   // If only one root node, return it directly
   if (rootNodes.length === 1) {
