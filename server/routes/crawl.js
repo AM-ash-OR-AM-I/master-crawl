@@ -544,24 +544,31 @@ router.post("/:jobId/improve", async (req, res) => {
 
     // Process with AI
     const { processSitemap } = require("../ai/aiProcessor");
-    const { recommendations, prompts } = await processSitemap(jobId, sitemap);
+    const { recommendations, prompt } = await processSitemap(jobId, sitemap);
 
     // Store recommendations
-    for (const rec of recommendations) {
-      await pool.query(
-        "INSERT INTO ai_recommendations (job_id, category, before, after, explanation) VALUES ($1, $2, $3, $4, $5)",
-        [
-          jobId,
-          rec.category,
-          JSON.stringify(rec.before),
-          JSON.stringify(rec.after),
-          rec.explanation,
-        ]
+    if (recommendations && recommendations.length > 0) {
+      for (const rec of recommendations) {
+        await pool.query(
+          "INSERT INTO ai_recommendations (job_id, category, before, after, explanation) VALUES ($1, $2, $3, $4, $5)",
+          [
+            jobId,
+            rec.category,
+            JSON.stringify(rec.before),
+            JSON.stringify(rec.after),
+            rec.explanation,
+          ]
+        );
+      }
+      console.log(
+        `Stored ${recommendations.length} recommendations for job ${jobId}`
       );
+    } else {
+      console.log(`No recommendations generated for job ${jobId}`);
     }
 
     // Store prompts - delete existing first, then insert new ones
-    if (prompts && prompts.improvement) {
+    if (prompt && prompt.systemPrompt && prompt.userPrompt) {
       try {
         // Delete existing prompts for this job
         await pool.query("DELETE FROM ai_prompts WHERE job_id = $1", [jobId]);
@@ -569,13 +576,7 @@ router.post("/:jobId/improve", async (req, res) => {
         // Store improvement prompt (single prompt)
         await pool.query(
           "INSERT INTO ai_prompts (job_id, prompt_type, chunk_index, system_prompt, user_prompt) VALUES ($1, $2, $3, $4, $5)",
-          [
-            jobId,
-            "improvement",
-            null,
-            prompts.improvement.systemPrompt,
-            prompts.improvement.userPrompt,
-          ]
+          [jobId, "improvement", null, prompt.systemPrompt, prompt.userPrompt]
         );
         console.log(`Stored improvement prompt for job ${jobId}`);
       } catch (error) {

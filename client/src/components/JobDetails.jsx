@@ -27,6 +27,8 @@ function JobDetails({ job, onClose }) {
       const response = await axios.get(`/api/crawl/${job.id}?includeSitemap=false`);
       console.log('Job details response:', response.data);
       console.log('Prompts data:', response.data.prompts);
+      console.log('Recommendations data:', response.data.recommendations);
+      console.log('Recommendations count:', response.data.recommendations?.length || 0);
       setDetails(response.data);
     } catch (error) {
       console.error('Error fetching job details:', error);

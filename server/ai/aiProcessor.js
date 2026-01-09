@@ -1,9 +1,47 @@
-const OpenAI = require('openai');
-const { pool } = require('../db/init');
+const OpenAI = require("openai");
+const { pool } = require("../db/init");
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Configure OpenAI client - supports both Azure OpenAI and standard OpenAI
+let openaiConfig = {};
+
+if (process.env.AZURE_OPENAI_ENDPOINT) {
+  // Azure OpenAI configuration
+  const azureApiKey =
+    process.env.AZURE_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+  const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT.replace(/\/$/, ""); // Remove trailing slash
+
+  openaiConfig = {
+    apiKey: azureApiKey,
+    baseURL: `${azureEndpoint}/openai/deployments`,
+    defaultQuery: {
+      "api-version":
+        process.env.AZURE_OPENAI_API_VERSION || "2024-02-15-preview",
+    },
+    defaultHeaders: {
+      "api-key": azureApiKey,
+    },
+  };
+  console.log("Using Azure OpenAI API");
+  console.log(`Azure OpenAI Endpoint: ${azureEndpoint}`);
+  console.log(
+    `Azure OpenAI Deployment: ${
+      process.env.AZURE_OPENAI_DEPLOYMENT || "not set"
+    }`
+  );
+  console.log(
+    `Azure OpenAI API Version: ${
+      process.env.AZURE_OPENAI_API_VERSION || "2024-02-15-preview"
+    }`
+  );
+} else {
+  // Standard OpenAI configuration
+  openaiConfig = {
+    apiKey: process.env.OPENAI_API_KEY,
+  };
+  console.log("Using standard OpenAI API");
+}
+
+const openai = new OpenAI(openaiConfig);
 
 const MAX_OUTPUT_TOKENS = 8000; // Increased for full sitemap output
 const MAX_TOKENS_PER_PROMPT = 120000; // Leave room for prompt template
@@ -15,40 +53,40 @@ const LARGE_SITEMAP_THRESHOLD = 400; // URLs threshold for switching to file-bas
  */
 function countUrlsInSitemap(sitemapTree) {
   if (!sitemapTree) return 0;
-  
+
   // If it's a canonical tree with metadata, use the accurate count
-  if (sitemapTree._meta && typeof sitemapTree._meta.total_pages === 'number') {
+  if (sitemapTree._meta && typeof sitemapTree._meta.total_pages === "number") {
     return sitemapTree._meta.total_pages;
   }
-  
+
   // If it's a legacy tree format, traverse and count nodes with URLs
   let count = 0;
   const visited = new Set(); // Prevent double counting
-  
+
   function traverse(node) {
     // Count nodes with URLs (skip empty root nodes)
-    if (node.url && node.url !== '' && !visited.has(node.url)) {
+    if (node.url && node.url !== "" && !visited.has(node.url)) {
       count++;
       visited.add(node.url);
     }
-    
+
     // Traverse children (array format)
     if (node.children && Array.isArray(node.children)) {
       node.children.forEach(traverse);
     }
     // Traverse children (object format - canonical tree)
-    else if (node.children && typeof node.children === 'object') {
+    else if (node.children && typeof node.children === "object") {
       Object.values(node.children).forEach(traverse);
     }
   }
-  
+
   // Handle canonical tree structure
   if (sitemapTree.tree) {
     traverse(sitemapTree.tree);
   } else {
     traverse(sitemapTree);
   }
-  
+
   return count;
 }
 
@@ -80,7 +118,7 @@ Rules:
  */
 function getFullPrompt() {
   const systemPrompt = getSystemPrompt();
-  
+
   const improvementPrompt = `INPUTS:
 1. Current sitemap tree (JSON)
 2. Detected structural issues (JSON)
@@ -111,7 +149,7 @@ Remember: Do NOT invent new content. Only restructure existing paths.`;
   return {
     system: systemPrompt,
     improvement: improvementPrompt,
-    full: `SYSTEM PROMPT:\n${systemPrompt}\n\n---\n\nIMPROVEMENT PROMPT:\n${improvementPrompt}`
+    full: `SYSTEM PROMPT:\n${systemPrompt}\n\n---\n\nIMPROVEMENT PROMPT:\n${improvementPrompt}`,
   };
 }
 
@@ -119,50 +157,61 @@ Remember: Do NOT invent new content. Only restructure existing paths.`;
  * Process sitemap with AI improvement (single prompt approach)
  * This function uses the canonical tree format and structural issues
  */
-async function processSitemap(jobId, sitemap, canonicalTree = null, structuralIssues = null, siteContext = {}) {
+async function processSitemap(
+  jobId,
+  sitemap,
+  canonicalTree = null,
+  structuralIssues = null,
+  siteContext = {}
+) {
   try {
     const systemPrompt = getSystemPrompt();
-    
+
     // If canonical tree not provided, convert from legacy format
     let treeToUse = canonicalTree;
     if (!treeToUse && sitemap) {
       // Convert legacy tree format to canonical format
-      const { buildCanonicalSitemapTree } = require('../utils/sitemapTreeBuilder');
+      const {
+        buildCanonicalSitemapTree,
+      } = require("../utils/sitemapTreeBuilder");
       // Extract pages from legacy sitemap format
       const pages = extractPagesFromTree(sitemap);
       treeToUse = buildCanonicalSitemapTree(pages);
     }
-    
+
     // Generate improved sitemap
     const { improvedSitemap, prompt, error } = await generateImprovedSitemap(
       treeToUse,
       structuralIssues,
       siteContext
     );
-    
+
     if (error || !improvedSitemap) {
-      throw new Error(error || 'Failed to generate improved sitemap');
+      throw new Error(error || "Failed to generate improved sitemap");
     }
-    
+
     // Extract recommendations from improved sitemap
     const recommendations = extractRecommendationsFromImproved(improvedSitemap);
-    
+    console.log(
+      `processSitemap: extracted ${recommendations.length} recommendations`
+    );
+
     return {
       recommendations,
       improvedSitemap,
       prompt: {
         systemPrompt: systemPrompt,
         userPrompt: prompt,
-        fullPrompt: `SYSTEM PROMPT:\n${systemPrompt}\n\n---\n\nUSER PROMPT:\n${prompt}`
+        fullPrompt: `SYSTEM PROMPT:\n${systemPrompt}\n\n---\n\nUSER PROMPT:\n${prompt}`,
       },
     };
   } catch (error) {
-    console.error('AI processing error:', error);
+    console.error("AI processing error:", error);
     return {
       recommendations: [],
       improvedSitemap: null,
       prompt: null,
-      error: error.message
+      error: error.message,
     };
   }
 }
@@ -172,24 +221,24 @@ async function processSitemap(jobId, sitemap, canonicalTree = null, structuralIs
  */
 function extractPagesFromTree(tree) {
   const pages = [];
-  
+
   function traverse(node, parentUrl = null, depth = 0) {
     if (node.url) {
       pages.push({
         url: node.url,
-        title: node.title || 'Untitled',
+        title: node.title || "Untitled",
         depth: depth,
-        parentUrl: parentUrl
+        parentUrl: parentUrl,
       });
     }
-    
+
     if (node.children && Array.isArray(node.children)) {
       for (const child of node.children) {
         traverse(child, node.url || parentUrl, depth + 1);
       }
     }
   }
-  
+
   traverse(tree);
   return pages;
 }
@@ -199,76 +248,112 @@ function extractPagesFromTree(tree) {
  */
 function extractRecommendationsFromImproved(improvedSitemap) {
   const recommendations = [];
-  
+
+  if (!improvedSitemap) {
+    console.log(
+      "extractRecommendationsFromImproved: improvedSitemap is null or undefined"
+    );
+    return recommendations;
+  }
+
+  console.log(
+    "extractRecommendationsFromImproved: improvedSitemap keys:",
+    Object.keys(improvedSitemap)
+  );
+
   // Extract from redirect_map
-  if (improvedSitemap.redirect_map && Array.isArray(improvedSitemap.redirect_map)) {
+  if (
+    improvedSitemap.redirect_map &&
+    Array.isArray(improvedSitemap.redirect_map)
+  ) {
+    console.log(
+      `Found ${improvedSitemap.redirect_map.length} redirect_map entries`
+    );
     for (const redirect of improvedSitemap.redirect_map) {
       recommendations.push({
-        category: 'URL_RESTRUCTURE',
+        category: "URL_RESTRUCTURE",
         before: redirect.from,
         after: redirect.to,
-        explanation: redirect.reason || 'Sitemap restructuring'
+        explanation: redirect.reason || "Sitemap restructuring",
       });
     }
+  } else {
+    console.log("No redirect_map found or not an array");
   }
-  
+
   // Extract from indexing_rules
-  if (improvedSitemap.indexing_rules && Array.isArray(improvedSitemap.indexing_rules)) {
+  if (
+    improvedSitemap.indexing_rules &&
+    Array.isArray(improvedSitemap.indexing_rules)
+  ) {
+    console.log(
+      `Found ${improvedSitemap.indexing_rules.length} indexing_rules entries`
+    );
     for (const rule of improvedSitemap.indexing_rules) {
       recommendations.push({
-        category: 'INDEXING',
+        category: "INDEXING",
         before: rule.path,
         after: rule.action,
-        explanation: rule.reason || 'SEO optimization'
+        explanation: rule.reason || "SEO optimization",
       });
     }
+  } else {
+    console.log("No indexing_rules found or not an array");
   }
-  
+
+  console.log(
+    `extractRecommendationsFromImproved: extracted ${recommendations.length} recommendations`
+  );
   return recommendations;
 }
-
 
 /**
  * Generate production-grade AI prompt for sitemap restructuring
  * This produces the new sitemap tree + redirect map
  */
-async function generateImprovedSitemap(currentSitemapTree, structuralIssues, siteContext = {}) {
+async function generateImprovedSitemap(
+  currentSitemapTree,
+  structuralIssues,
+  siteContext = {}
+) {
   const systemPrompt = getSystemPrompt();
-  
-  const siteType = siteContext.siteType || 'mixed';
-  const contentIntent = siteContext.contentIntent || 'informational';
-  const seoGoal = siteContext.seoGoal || 'reduce crawl waste, create topic hubs';
+
+  const siteType = siteContext.siteType || "mixed";
+  const contentIntent = siteContext.contentIntent || "informational";
+  const seoGoal =
+    siteContext.seoGoal || "reduce crawl waste, create topic hubs";
   const maxDepth = siteContext.maxDepth || 3;
 
   // Format issues for AI
-  const issuesFormatted = structuralIssues ? {
-    depth: {
-      too_deep_count: structuralIssues.depth?.too_deep?.length || 0,
-      max_depth: structuralIssues.depth?.max_depth || 0
-    },
-    duplication: {
-      numeric_slugs: structuralIssues.duplication?.numeric_slugs?.slice(0, 10) || [],
-      auto_generated: structuralIssues.duplication?.auto_generated?.slice(0, 10) || []
-    },
-    hierarchy: {
-      overloaded_root: structuralIssues.hierarchy?.overloaded_root || false,
-      flat_sections: structuralIssues.hierarchy?.flat_sections || []
-    },
-    crawl_waste: {
-      faceted: structuralIssues.crawl_waste?.faceted?.slice(0, 10) || [],
-      orphaned: structuralIssues.crawl_waste?.orphaned?.slice(0, 10) || []
-    }
-  } : {};
+  const issuesFormatted = structuralIssues
+    ? {
+        depth: {
+          too_deep_count: structuralIssues.depth?.too_deep?.length || 0,
+          max_depth: structuralIssues.depth?.max_depth || 0,
+        },
+        duplication: {
+          numeric_slugs:
+            structuralIssues.duplication?.numeric_slugs?.slice(0, 10) || [],
+          auto_generated:
+            structuralIssues.duplication?.auto_generated?.slice(0, 10) || [],
+        },
+        hierarchy: {
+          overloaded_root: structuralIssues.hierarchy?.overloaded_root || false,
+          flat_sections: structuralIssues.hierarchy?.flat_sections || [],
+        },
+        crawl_waste: {
+          faceted: structuralIssues.crawl_waste?.faceted?.slice(0, 10) || [],
+          orphaned: structuralIssues.crawl_waste?.orphaned?.slice(0, 10) || [],
+        },
+      }
+    : {};
 
-  // Always use file-based output format
-  const userPrompt = `EXECUTION MODE: FILE-BASED OUTPUT (REQUIRED)
-
-You MUST generate downloadable files to avoid truncation, partial output, or broken JSON.
+  // Request JSON format with expected structure for recommendations
+  const userPrompt = `You are analyzing a website sitemap to provide SEO recommendations.
 
 INPUTS:
 1. Current sitemap tree (JSON)
-2. Page metadata (JSON)
-3. Detected structural issues (JSON)
+2. Detected structural issues (JSON)
 
 SITE CONTEXT:
 - Site type: ${siteType}
@@ -277,121 +362,195 @@ SITE CONTEXT:
 - Indexing constraints: account & filters must be noindex
 - Maximum depth allowed: ${maxDepth}
 
-TASKS:
-1. Propose a NEW sitemap tree that addresses the structural issues
-2. Ensure depth ≤ ${maxDepth}
-3. Consolidate flat or fragmented sections into logical hubs
-4. Return a redirect map (301) for all moved paths
-5. List index/noindex recommendations
-6. Explain structural changes briefly
-
 CURRENT SITEMAP TREE:
 ${JSON.stringify(currentSitemapTree, null, 2)}
 
 STRUCTURAL ISSUES:
 ${JSON.stringify(issuesFormatted, null, 2)}
 
-📌 OUTPUT REQUIREMENTS (FILE-BASED):
+TASKS:
+1. Analyze the current sitemap structure
+2. Identify URLs that should be redirected (301) to better paths
+3. Identify paths that should be set to noindex
+4. Provide recommendations for restructuring
 
-You MUST provide ONLY the Excel file as downloadable file contents or code blocks:
+OUTPUT FORMAT:
+You MUST respond with ONLY valid JSON in the following format:
 
-new_sitemap.xlsx - Excel file with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes (provide as CSV format or structured data that can be converted to Excel)
+\`\`\`json
+{
+  "redirect_map": [
+    {
+      "from": "/old/path",
+      "to": "/new/path",
+      "status": 301,
+      "reason": "Brief explanation of why this redirect is needed"
+    }
+  ],
+  "indexing_rules": [
+    {
+      "path": "/path/to/noindex",
+      "action": "noindex",
+      "reason": "Brief explanation of why this should be noindexed"
+    }
+  ],
+  "rationale": "Brief overall explanation of the recommendations"
+}
+\`\`\`
 
-CRITICAL VALIDATION RULES:
-❌ If Excel file is incomplete → RESPONSE IS INVALID
-❌ If data is truncated or broken → RESPONSE IS INVALID
-❌ If branches are collapsed or placeholders used → RESPONSE IS INVALID
-
-✅ CORRECT EXECUTION:
-- Every URL from the CURRENT SITEMAP TREE input MUST appear in the Excel file (possibly restructured)
-- Excel file must include all URLs with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes
-- Use code blocks with language tags: \`\`\`csv or \`\`\`json for the Excel data
-- Fully expand all tree branches - no collapsing, no placeholders
-
-ALTERNATIVE: If file generation is not possible, use CHUNKED RESPONSE mode:
-- Provide new_sitemap.xlsx data in chunks (CSV format or structured JSON with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes)
-
-Each chunk must be clearly labeled (e.g., "EXCEL_DATA — Part 1/3").
-
-Note: For Excel file, provide data in CSV format or as structured JSON array that can be easily converted to Excel with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes. Each row should represent a page, with the page title in the appropriate level column based on its depth in the hierarchy.
+CRITICAL REQUIREMENTS:
+- Respond with ONLY the JSON object, wrapped in \`\`\`json code blocks
+- Include redirect_map array with all recommended redirects
+- Include indexing_rules array with all recommended noindex rules
+- Each redirect must have: from, to, status (301), and reason
+- Each indexing rule must have: path, action ("noindex"), and reason
+- Do NOT invent new content - only recommend changes to existing URLs
+- Focus on addressing the structural issues provided
 
 Remember: Do NOT invent new content. Only restructure existing paths.`;
 
   try {
+    // Determine model name - Azure OpenAI uses deployment name, standard OpenAI uses model name
+    const modelName =
+      process.env.AZURE_OPENAI_DEPLOYMENT ||
+      process.env.OPENAI_MODEL ||
+      "gpt-4-turbo-preview";
+
     const response = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview',
+      model: modelName,
       messages: [
         {
-          role: 'system',
+          role: "system",
           content: systemPrompt,
         },
         {
-          role: 'user',
+          role: "user",
           content: userPrompt,
         },
       ],
       max_tokens: MAX_OUTPUT_TOKENS * 2, // Allow more tokens for full sitemap
       temperature: 0.3,
     });
-    
+
     const content = response.choices[0].message.content;
-    const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
-    const jsonStr = jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : content;
-    
-    const improvedSitemap = JSON.parse(jsonStr);
+    console.log("AI response content length:", content.length);
+    console.log("AI response preview:", content.substring(0, 500));
+
+    // Try multiple patterns to extract JSON
+    let jsonStr = null;
+
+    // First try: JSON code block
+    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonBlockMatch) {
+      jsonStr = jsonBlockMatch[1].trim();
+    } else {
+      // Second try: Any code block
+      const codeBlockMatch = content.match(/```\s*([\s\S]*?)\s*```/);
+      if (codeBlockMatch) {
+        jsonStr = codeBlockMatch[1].trim();
+        // Remove language identifier if present
+        jsonStr = jsonStr.replace(/^[a-z]+\n/, "");
+      } else {
+        // Third try: Find JSON object in content
+        const jsonObjectMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonObjectMatch) {
+          jsonStr = jsonObjectMatch[0];
+        } else {
+          jsonStr = content.trim();
+        }
+      }
+    }
+
+    let improvedSitemap;
+    try {
+      improvedSitemap = JSON.parse(jsonStr);
+      console.log(
+        "Parsed improved sitemap keys:",
+        Object.keys(improvedSitemap || {})
+      );
+      console.log("Has redirect_map:", !!improvedSitemap?.redirect_map);
+      console.log("Has indexing_rules:", !!improvedSitemap?.indexing_rules);
+
+      // Validate structure
+      if (!improvedSitemap.redirect_map && !improvedSitemap.indexing_rules) {
+        console.warn(
+          "Warning: Response does not contain redirect_map or indexing_rules"
+        );
+      }
+    } catch (parseError) {
+      console.error("JSON parse error:", parseError.message);
+      console.error("Attempted to parse:", jsonStr.substring(0, 500));
+      throw new Error(
+        `Failed to parse AI response as JSON: ${parseError.message}`
+      );
+    }
+
     return { improvedSitemap, prompt: userPrompt };
   } catch (error) {
-    console.error('Generate improved sitemap error:', error);
+    console.error("Generate improved sitemap error:", error);
     return { improvedSitemap: null, prompt: userPrompt, error: error.message };
   }
 }
-
-
-
 
 /**
  * Generate single prompt with sitemap data (without calling AI)
  * This generates the prompt that can be used manually in ChatGPT
  */
-function generatePromptsWithData(sitemap, canonicalTree = null, structuralIssues = null, siteContext = {}) {
+function generatePromptsWithData(
+  sitemap,
+  canonicalTree = null,
+  structuralIssues = null,
+  siteContext = {}
+) {
   try {
     const systemPrompt = getSystemPrompt();
-    
+
     // If canonical tree not provided, try to build it
     let treeToUse = canonicalTree;
     if (!treeToUse && sitemap) {
-      const { buildCanonicalSitemapTree } = require('../utils/sitemapTreeBuilder');
+      const {
+        buildCanonicalSitemapTree,
+      } = require("../utils/sitemapTreeBuilder");
       const pages = extractPagesFromTree(sitemap);
       treeToUse = buildCanonicalSitemapTree(pages);
     }
-    
+
     // Build the improvement prompt
-    const siteType = siteContext.siteType || 'mixed';
-    const contentIntent = siteContext.contentIntent || 'informational';
-    const seoGoal = siteContext.seoGoal || 'reduce crawl waste, create topic hubs';
+    const siteType = siteContext.siteType || "mixed";
+    const contentIntent = siteContext.contentIntent || "informational";
+    const seoGoal =
+      siteContext.seoGoal || "reduce crawl waste, create topic hubs";
     const maxDepth = siteContext.maxDepth || 3;
 
     // Format issues for prompt
-    const issuesFormatted = structuralIssues ? {
-      depth: {
-        too_deep_count: structuralIssues.depth?.too_deep?.length || 0,
-        too_deep_examples: structuralIssues.depth?.too_deep?.slice(0, 5) || [],
-        max_depth: structuralIssues.depth?.max_depth || 0
-      },
-      duplication: {
-        numeric_slugs: structuralIssues.duplication?.numeric_slugs?.slice(0, 10) || [],
-        auto_generated: structuralIssues.duplication?.auto_generated?.slice(0, 10) || []
-      },
-      hierarchy: {
-        overloaded_root: structuralIssues.hierarchy?.overloaded_root || false,
-        root_sections_count: structuralIssues.hierarchy?.root_sections_count || 0,
-        flat_sections: structuralIssues.hierarchy?.flat_sections || []
-      },
-      crawl_waste: {
-        faceted: structuralIssues.crawl_waste?.faceted?.slice(0, 10) || [],
-        orphaned: structuralIssues.crawl_waste?.orphaned?.slice(0, 10) || []
-      }
-    } : {};
+    const issuesFormatted = structuralIssues
+      ? {
+          depth: {
+            too_deep_count: structuralIssues.depth?.too_deep?.length || 0,
+            too_deep_examples:
+              structuralIssues.depth?.too_deep?.slice(0, 5) || [],
+            max_depth: structuralIssues.depth?.max_depth || 0,
+          },
+          duplication: {
+            numeric_slugs:
+              structuralIssues.duplication?.numeric_slugs?.slice(0, 10) || [],
+            auto_generated:
+              structuralIssues.duplication?.auto_generated?.slice(0, 10) || [],
+          },
+          hierarchy: {
+            overloaded_root:
+              structuralIssues.hierarchy?.overloaded_root || false,
+            root_sections_count:
+              structuralIssues.hierarchy?.root_sections_count || 0,
+            flat_sections: structuralIssues.hierarchy?.flat_sections || [],
+          },
+          crawl_waste: {
+            faceted: structuralIssues.crawl_waste?.faceted?.slice(0, 10) || [],
+            orphaned:
+              structuralIssues.crawl_waste?.orphaned?.slice(0, 10) || [],
+          },
+        }
+      : {};
 
     // Always use file-based output format
     const userPrompt = `EXECUTION MODE: FILE-BASED OUTPUT (REQUIRED)
@@ -449,30 +608,29 @@ Each chunk must be clearly labeled (e.g., "EXCEL_DATA — Part 1/3").
 Note: For Excel file, provide data in CSV format or as structured JSON array that can be easily converted to Excel with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes. Each row should represent a page, with the page title in the appropriate level column based on its depth in the hierarchy.
 
 Remember: Do NOT invent new content. Only restructure existing paths.`;
-    
+
     return {
       improvement: {
         systemPrompt: systemPrompt,
         userPrompt: userPrompt,
-        fullPrompt: `SYSTEM PROMPT:\n${systemPrompt}\n\n---\n\nUSER PROMPT:\n${userPrompt}`
-      }
+        fullPrompt: `SYSTEM PROMPT:\n${systemPrompt}\n\n---\n\nUSER PROMPT:\n${userPrompt}`,
+      },
     };
   } catch (error) {
-    console.error('Error generating prompts with data:', error);
+    console.error("Error generating prompts with data:", error);
     return {
-      improvement: null
+      improvement: null,
     };
   }
 }
 
-module.exports = { 
-  processSitemap, 
-  getSystemPrompt, 
-  getFullPrompt, 
+module.exports = {
+  processSitemap,
+  getSystemPrompt,
+  getFullPrompt,
   generatePromptsWithData,
   generateImprovedSitemap,
   extractPagesFromTree,
   countUrlsInSitemap,
-  LARGE_SITEMAP_THRESHOLD
+  LARGE_SITEMAP_THRESHOLD,
 };
-
