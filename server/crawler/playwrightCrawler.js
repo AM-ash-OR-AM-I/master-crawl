@@ -2690,31 +2690,11 @@ async function crawlWebsite({
         break;
       }
 
-      // Sort queue to preserve navigation structure
-      // Priority: 1) Depth 2) Links with titles (navigation - preserve order) 3) Links without titles (sort by URL)
+      // Sort queue only by depth for BFS (breadth-first search)
+      // Within same depth, preserve the order links were added (HTML order)
       queue.sort((a, b) => {
-        // Sort by depth first (BFS)
-        if (a.depth !== b.depth) return a.depth - b.depth;
-
-        // Within same depth, prioritize links with titles (navigation links)
-        const hasTitleA = !!a.linkTitle;
-        const hasTitleB = !!b.linkTitle;
-
-        if (hasTitleA && !hasTitleB) return -1; // A has title, B doesn't - A comes first
-        if (!hasTitleA && hasTitleB) return 1; // B has title, A doesn't - B comes first
-
-        // Both have titles - preserve original order (don't sort by title)
-        // Use a stable sort key based on original insertion order
-        // Since we can't track original order easily in queue, use URL as tiebreaker
-        // but this maintains relative order for items added in same batch
-        if (hasTitleA && hasTitleB) {
-          // Don't sort by title - preserve order by using URL as stable sort key
-          // This maintains the order links were discovered/added
-          return a.url.localeCompare(b.url);
-        }
-
-        // Both don't have titles - sort alphabetically by URL for deterministic order
-        return a.url.localeCompare(b.url);
+        // Only sort by depth - preserve insertion order within same depth
+        return a.depth - b.depth;
       });
 
       const batch = queue.splice(0, CONCURRENCY);
@@ -3008,37 +2988,9 @@ async function crawlWebsite({
               : url;
 
             if (!error && links && links.length > 0) {
-              // Preserve navigation order: links with titles keep their original HTML order
-              // Priority: 1) Links with titles (navigation - preserve order) 2) Links without titles (footer/content - can sort)
-              const getTitle = (url) => {
-                return (
-                  linkTitleMap.get(url) ||
-                  linkTitleMap.get(normalizeUrl(url)) ||
-                  linkTitleMap.get(getCanonicalUrl(url)) ||
-                  linkTitleMap.get(getCanonicalUrl(url) + "/") ||
-                  null
-                );
-              };
-
-              // Separate links into navigation (with titles) and footer/content (without titles)
-              const navigationLinks = [];
-              const otherLinks = [];
-
-              links.forEach((link) => {
-                if (getTitle(link)) {
-                  navigationLinks.push(link); // Keep original order
-                } else {
-                  otherLinks.push(link);
-                }
-              });
-
-              // Sort only the links without titles (footer/content links)
-              otherLinks.sort((a, b) => a.localeCompare(b));
-
-              // Combine: navigation links first (in original order), then sorted footer/content links
-              const sortedLinks = [...navigationLinks, ...otherLinks];
-
-              for (const link of sortedLinks) {
+              // Process links in the exact order they appear in HTML (top to bottom)
+              // No sorting - preserve natural navigation order as user would see it
+              for (const link of links) {
                 try {
                   // Validate link URL
                   const linkUrl = new URL(link);
