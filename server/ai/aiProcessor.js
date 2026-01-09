@@ -8,11 +8,30 @@ if (process.env.AZURE_OPENAI_ENDPOINT) {
   // Azure OpenAI configuration
   const azureApiKey =
     process.env.AZURE_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
-  const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT.replace(/\/$/, ""); // Remove trailing slash
+  let azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT.replace(/\/$/, ""); // Remove trailing slash
+  const deploymentName = process.env.AZURE_OPENAI_DEPLOYMENT;
+
+  if (!deploymentName) {
+    throw new Error(
+      "AZURE_OPENAI_DEPLOYMENT is required when using Azure OpenAI"
+    );
+  }
+
+  // Ensure endpoint is just the base URL (remove any trailing paths)
+  // Azure endpoint should be: https://{resource-name}.openai.azure.com
+  if (azureEndpoint.includes("/openai")) {
+    azureEndpoint = azureEndpoint.split("/openai")[0];
+  }
+
+  // For Azure OpenAI with OpenAI SDK v4+, the baseURL should be the base endpoint
+  // The SDK will append paths, but Azure needs: /openai/deployments/{deployment}/chat/completions
+  // So we set baseURL to include the deployment path
+  // Format: https://{resource-name}.openai.azure.com/openai/deployments/{deployment-name}
+  const azureBaseURL = `${azureEndpoint}/openai/deployments/${deploymentName}`;
 
   openaiConfig = {
     apiKey: azureApiKey,
-    baseURL: `${azureEndpoint}/openai/deployments`,
+    baseURL: azureBaseURL,
     defaultQuery: {
       "api-version":
         process.env.AZURE_OPENAI_API_VERSION || "2024-02-15-preview",
@@ -23,16 +42,28 @@ if (process.env.AZURE_OPENAI_ENDPOINT) {
   };
   console.log("Using Azure OpenAI API");
   console.log(`Azure OpenAI Endpoint: ${azureEndpoint}`);
-  console.log(
-    `Azure OpenAI Deployment: ${
-      process.env.AZURE_OPENAI_DEPLOYMENT || "not set"
-    }`
-  );
+  console.log(`Azure OpenAI Deployment: ${deploymentName}`);
   console.log(
     `Azure OpenAI API Version: ${
       process.env.AZURE_OPENAI_API_VERSION || "2024-02-15-preview"
     }`
   );
+  console.log(`Full baseURL: ${openaiConfig.baseURL}`);
+  console.log(
+    `Expected request URL: ${openaiConfig.baseURL}/chat/completions?api-version=${openaiConfig.defaultQuery["api-version"]}`
+  );
+
+  // Validate configuration
+  if (!azureApiKey) {
+    throw new Error(
+      "Azure OpenAI API key is required. Set AZURE_OPENAI_API_KEY or OPENAI_API_KEY"
+    );
+  }
+  if (!azureEndpoint || !azureEndpoint.startsWith("https://")) {
+    throw new Error(
+      `Invalid Azure OpenAI endpoint: ${azureEndpoint}. Should be https://{resource-name}.openai.azure.com`
+    );
+  }
 } else {
   // Standard OpenAI configuration
   openaiConfig = {
@@ -410,11 +441,25 @@ CRITICAL REQUIREMENTS:
 Remember: Do NOT invent new content. Only restructure existing paths.`;
 
   try {
-    // Determine model name - Azure OpenAI uses deployment name, standard OpenAI uses model name
-    const modelName =
-      process.env.AZURE_OPENAI_DEPLOYMENT ||
-      process.env.OPENAI_MODEL ||
-      "gpt-4-turbo-preview";
+    // For Azure OpenAI, the model parameter should be the deployment name
+    // For standard OpenAI, use the model name from env or default
+    // Note: For Azure, the deployment is already in the baseURL, so we can use any value
+    // but Azure requires the model parameter to match the deployment name
+    const modelName = process.env.AZURE_OPENAI_ENDPOINT
+      ? process.env.AZURE_OPENAI_DEPLOYMENT
+      : process.env.OPENAI_MODEL || "gpt-4-turbo-preview";
+
+    if (!modelName) {
+      throw new Error(
+        "Model name is required. Set AZURE_OPENAI_DEPLOYMENT for Azure or OPENAI_MODEL for standard OpenAI"
+      );
+    }
+
+    console.log("Using model:", modelName);
+    if (process.env.AZURE_OPENAI_ENDPOINT) {
+      console.log("Azure OpenAI baseURL:", openaiConfig.baseURL);
+      console.log("Request will be made to Azure OpenAI endpoint");
+    }
 
     const response = await openai.chat.completions.create({
       model: modelName,
@@ -488,6 +533,31 @@ Remember: Do NOT invent new content. Only restructure existing paths.`;
     return { improvedSitemap, prompt: userPrompt };
   } catch (error) {
     console.error("Generate improved sitemap error:", error);
+    if (error.status) {
+      console.error(`HTTP Status: ${error.status}`);
+    }
+    if (error.code) {
+      console.error(`Error Code: ${error.code}`);
+    }
+    if (error.error) {
+      console.error(`Error Details:`, JSON.stringify(error.error, null, 2));
+    }
+    if (process.env.AZURE_OPENAI_ENDPOINT) {
+      console.error(
+        `Azure OpenAI Configuration Check:
+        - Endpoint: ${process.env.AZURE_OPENAI_ENDPOINT}
+        - Deployment: ${process.env.AZURE_OPENAI_DEPLOYMENT}
+        - API Version: ${
+          process.env.AZURE_OPENAI_API_VERSION || "2024-02-15-preview"
+        }
+        - BaseURL: ${openaiConfig.baseURL}
+        Please verify:
+        1. The deployment name matches exactly (case-sensitive)
+        2. The endpoint URL is correct: https://{resource-name}.openai.azure.com
+        3. The API key has access to this deployment
+        4. The deployment exists and is active in Azure Portal`
+      );
+    }
     return { improvedSitemap: null, prompt: userPrompt, error: error.message };
   }
 }
