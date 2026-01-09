@@ -86,10 +86,31 @@ router.get("/:jobId", async (req, res) => {
     const { jobId } = req.params;
     const includeSitemap = req.query.includeSitemap === "true";
 
-    const jobResult = await pool.query(
-      "SELECT * FROM crawl_jobs WHERE id = $1",
-      [jobId]
-    );
+    // Run all independent queries in parallel for better performance
+    const [jobResult, recsResult, sitemapQuery] = await Promise.all([
+      // Get job details
+      pool.query("SELECT * FROM crawl_jobs WHERE id = $1", [jobId]),
+      // Get recommendations (can run in parallel)
+      pool.query(
+        "SELECT * FROM ai_recommendations WHERE job_id = $1 ORDER BY created_at",
+        [jobId]
+      ),
+      // Get sitemap (optimized based on includeSitemap flag)
+      includeSitemap
+        ? // Full sitemap requested
+          pool.query(
+            "SELECT original_sitemap FROM sitemaps WHERE job_id = $1",
+            [jobId]
+          )
+        : // Metadata only - use COALESCE to handle null metadata in one query
+          pool.query(
+            `SELECT 
+              COALESCE(original_sitemap->'_crawlMeta', 'null'::jsonb) as metadata,
+              CASE WHEN original_sitemap IS NOT NULL THEN true ELSE false END as exists
+            FROM sitemaps WHERE job_id = $1`,
+            [jobId]
+          ),
+    ]);
 
     if (jobResult.rows.length === 0) {
       return res.status(404).json({ error: "Job not found" });
@@ -97,59 +118,32 @@ router.get("/:jobId", async (req, res) => {
 
     const job = jobResult.rows[0];
 
-    // Get pages count
-    const pagesResult = await pool.query(
-      "SELECT COUNT(*) as count FROM pages WHERE job_id = $1",
-      [jobId]
-    );
+    // Use pages_crawled from job instead of COUNT(*) for better performance
+    // COUNT(*) can be slow on large tables, and we already track this during crawl
+    const pagesCount = job.pages_crawled || 0;
 
-    // Get sitemap only if requested (for performance)
-    let sitemapResult = null;
+    // Process sitemap data
     let sitemapData = null;
+    let sitemapResult = null;
     if (includeSitemap) {
-      // Fetch full sitemap when explicitly requested
-      sitemapResult = await pool.query(
-        "SELECT original_sitemap FROM sitemaps WHERE job_id = $1",
-        [jobId]
-      );
-      if (sitemapResult.rows[0]) {
-        // JSONB columns are already parsed by pg library
+      // Full sitemap requested
+      if (sitemapQuery.rows[0]) {
+        sitemapResult = sitemapQuery;
         sitemapData = {
-          original_sitemap: sitemapResult.rows[0].original_sitemap,
+          original_sitemap: sitemapQuery.rows[0].original_sitemap,
         };
       }
     } else {
-      // Even if not including full sitemap, check if it exists and get metadata only
-      // Use PostgreSQL JSONB path query to only extract metadata (more efficient)
-      sitemapResult = await pool.query(
-        "SELECT original_sitemap->'_crawlMeta' as metadata FROM sitemaps WHERE job_id = $1",
-        [jobId]
-      );
-      if (sitemapResult.rows[0] && sitemapResult.rows[0].metadata) {
-        // Only include metadata, not the full tree
-        // Always return an object structure so frontend can check _crawlMeta
+      // Metadata only
+      if (sitemapQuery.rows[0] && sitemapQuery.rows[0].exists) {
+        const metadata = sitemapQuery.rows[0].metadata;
         sitemapData = {
-          original_sitemap: { _crawlMeta: sitemapResult.rows[0].metadata },
+          original_sitemap: {
+            _crawlMeta: metadata && metadata !== "null" ? metadata : null,
+          },
         };
-      } else {
-        // Sitemap exists but no metadata - return empty structure
-        const sitemapExists = await pool.query(
-          "SELECT 1 FROM sitemaps WHERE job_id = $1",
-          [jobId]
-        );
-        if (sitemapExists.rows.length > 0) {
-          sitemapData = {
-            original_sitemap: { _crawlMeta: null },
-          };
-        }
       }
     }
-
-    // Get recommendations
-    const recsResult = await pool.query(
-      "SELECT * FROM ai_recommendations WHERE job_id = $1 ORDER BY created_at",
-      [jobId]
-    );
 
     // Generate prompts with sitemap data (if sitemap exists and is included)
     let prompts = null;
@@ -171,7 +165,7 @@ router.get("/:jobId", async (req, res) => {
     // Only include prompts if they exist
     const responseData = {
       ...job,
-      pagesCount: parseInt(pagesResult.rows[0].count),
+      pagesCount: pagesCount,
       sitemap: sitemapData,
       recommendations: recsResult.rows || [],
     };
