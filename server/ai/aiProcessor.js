@@ -363,6 +363,25 @@ function extractRecommendationsFromImproved(improvedSitemap) {
     console.log("No indexing_rules found or not an array");
   }
 
+  // Extract from path_fixes (relative/absolute path issues)
+  if (improvedSitemap.path_fixes && Array.isArray(improvedSitemap.path_fixes)) {
+    console.log(
+      `Found ${improvedSitemap.path_fixes.length} path_fixes entries`
+    );
+    for (const fix of improvedSitemap.path_fixes) {
+      recommendations.push({
+        category: "PATH_FIX",
+        before: fix.originalHref,
+        after: fix.suggestedHref,
+        explanation:
+          fix.reason ||
+          `Relative path issue on page ${fix.page}: ${fix.originalHref} should be ${fix.suggestedHref} to prevent 404 errors on non-root pages`,
+      });
+    }
+  } else {
+    console.log("No path_fixes found or not an array");
+  }
+
   console.log(
     `extractRecommendationsFromImproved: extracted ${recommendations.length} recommendations`
   );
@@ -437,9 +456,17 @@ TASKS:
    - For 404 errors with "Redirect or Remove": suggest redirects to appropriate pages or mark for removal in redirect_map
    - For other error types: suggest investigation actions
    - Include broken link fixes in your redirect_map recommendations
+   - **CRITICAL: Detect relative/absolute path issues:**
+     - Check the \`originalHref\` field in broken links - this is the original href attribute from HTML
+     - Identify relative paths (e.g., \`href="page.html"\`, \`href="./page.html"\`, \`href="../page.html"\`) that should be absolute paths
+     - **Problem**: Relative paths work on root page (/) but cause 404 errors on deeper pages because they resolve relative to the current page's path
+     - **Example**: If page at /products/item.html has \`href="contact.html"\`, it resolves to /products/contact.html (404) instead of /contact.html
+     - **Solution**: Convert relative paths to absolute paths (e.g., \`href="/contact.html"\` or \`href="https://example.com/contact.html"\`)
+     - For each broken link with a relative path in \`originalHref\`, suggest converting to absolute path
+     - Include these as recommendations with category "PATH_FIX" in your response
 3. Identify URLs that should be redirected (301) to better paths
 4. Identify paths that should be set to noindex
-5. Provide recommendations for restructuring
+5. Provide recommendations for restructuring, including path fixes
 
 OUTPUT FORMAT:
 You MUST respond with ONLY valid JSON in the following format:
@@ -461,6 +488,14 @@ You MUST respond with ONLY valid JSON in the following format:
       "reason": "Brief explanation of why this should be noindexed"
     }
   ],
+  "path_fixes": [
+    {
+      "page": "/products/item.html",
+      "originalHref": "contact.html",
+      "suggestedHref": "/contact.html",
+      "reason": "Relative path causes 404 on non-root pages - convert to absolute path"
+    }
+  ],
   "rationale": "Brief overall explanation of the recommendations"
 }
 \`\`\`
@@ -471,11 +506,16 @@ CRITICAL REQUIREMENTS:
   - MUST include redirects for broken links from \`issues.brokenLinks\` section (especially 404 errors)
   - Use the \`recommendation\` field from broken links to determine action (redirect or remove)
 - Include indexing_rules array with all recommended noindex rules
+- Include path_fixes array for relative/absolute path issues:
+  - Check \`originalHref\` in broken links for relative paths (e.g., "page.html", "./page.html", "../page.html")
+  - For each relative path that should be absolute, include: page (where the issue was found), originalHref (the relative path), suggestedHref (the absolute path), and reason
+  - Explain that relative paths cause 404s on non-root pages
 - Each redirect must have: from, to, status (301), and reason
   - For broken links: reason should reference the errorType (e.g., "404 Not Found - redirecting to parent page")
 - Each indexing rule must have: path, action ("noindex"), and reason
+- Each path fix must have: page, originalHref, suggestedHref, and reason
 - Do NOT invent new content - only recommend changes to existing URLs
-- Focus on addressing the structural issues provided AND broken links from the \`issues.brokenLinks\` section
+- Focus on addressing the structural issues provided AND broken links from the \`issues.brokenLinks\` section AND relative/absolute path issues
 
 Remember: Do NOT invent new content. Only restructure existing paths.`;
 
@@ -687,11 +727,19 @@ TASKS:
    - Use the \`recommendation\` field (e.g., "Redirect or Remove", "Investigate") to suggest appropriate fixes
    - For 404 errors with "Redirect or Remove" recommendation: suggest redirects to appropriate pages or mark for removal
    - For other error types: suggest investigation and appropriate actions
-3. Ensure depth ≤ ${maxDepth}
-4. Consolidate flat or fragmented sections into logical hubs
-5. Return a redirect map (301) for all moved paths AND broken links that should be redirected
-6. List index/noindex recommendations
-7. Explain structural changes briefly, including how broken links are addressed
+3. **CRITICAL: Detect relative/absolute path issues in hrefs:**
+   - Check the \`originalHref\` field in broken links - this is the original href attribute from HTML
+   - Identify relative paths (e.g., \`href="page.html"\`, \`href="./page.html"\`, \`href="../page.html"\`) that should be absolute paths
+   - **Problem**: Relative paths work on root page (/) but cause 404 errors on deeper pages because they resolve relative to the current page's path
+   - **Example**: If page at /products/item.html has \`href="contact.html"\`, it resolves to /products/contact.html (404) instead of /contact.html
+   - **Solution**: Convert relative paths to absolute paths (e.g., \`href="/contact.html"\` or \`href="https://example.com/contact.html"\`)
+   - For each broken link with a relative path in \`originalHref\`, suggest converting to absolute path in your recommendations
+   - Include these fixes in your redirect_map or as separate recommendations with category "PATH_FIX"
+4. Ensure depth ≤ ${maxDepth}
+5. Consolidate flat or fragmented sections into logical hubs
+6. Return a redirect map (301) for all moved paths AND broken links that should be redirected
+7. List index/noindex recommendations
+8. Explain structural changes briefly, including how broken links and path issues are addressed
 
 NOTE: The sitemap.json file is attached to this conversation. Please analyze the structure from the attached file, paying special attention to the \`issues.brokenLinks\` section to suggest fixes for broken links.
 
@@ -715,6 +763,7 @@ CRITICAL VALIDATION RULES:
 - Use code blocks with language tags: \`\`\`csv or \`\`\`json for the Excel data
 - Fully expand all tree branches - no collapsing, no placeholders
 - Address broken links from \`issues.brokenLinks\` section: include redirects in redirect_map or mark for removal in Notes column
+- Address relative/absolute path issues: For pages with relative paths in \`originalHref\` that cause 404s, note the fix in the Notes column (e.g., "Fix: Change href='contact.html' to href='/contact.html' to prevent 404 on non-root pages")
 
 ALTERNATIVE: If file generation is not possible, use CHUNKED RESPONSE mode:
 - Provide new_sitemap.xlsx data in chunks (CSV format or structured JSON with hierarchical columns: Top Level Navigation Landing Page (1st level), 2nd Level Subpage, 3rd Level Subpage, 4th Level Subpage, 5th Level Subpage, 6th Level Subpage, 7th Level Subpage, Notes)
