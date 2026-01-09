@@ -187,6 +187,7 @@ Remember: Do NOT invent new content. Only restructure existing paths.`;
 /**
  * Process sitemap with AI improvement (single prompt approach)
  * This function uses the canonical tree format and structural issues
+ * Now uses the same format as exported JSON (flat pages array from database)
  */
 async function processSitemap(
   jobId,
@@ -198,15 +199,30 @@ async function processSitemap(
   try {
     const systemPrompt = getSystemPrompt();
 
-    // If canonical tree not provided, convert from legacy format
+    // Fetch pages directly from database (same as exported JSON format)
+    // This ensures consistency with the exported JSON format
     let treeToUse = canonicalTree;
-    if (!treeToUse && sitemap) {
-      // Convert legacy tree format to canonical format
+    if (!treeToUse) {
       const {
         buildCanonicalSitemapTree,
       } = require("../utils/sitemapTreeBuilder");
-      // Extract pages from legacy sitemap format
-      const pages = extractPagesFromTree(sitemap);
+
+      // Fetch pages from database in the same format as exported JSON
+      // This ensures we use the exact same data source as the exported JSON
+      const pagesResult = await pool.query(
+        "SELECT url, title, depth, parent_url, original_href FROM pages WHERE job_id = $1 ORDER BY depth, COALESCE(sequence, 999999), crawled_at",
+        [jobId]
+      );
+
+      const pages = pagesResult.rows.map((row) => ({
+        url: row.url,
+        title: row.title || "Untitled",
+        depth: row.depth || 0,
+        parentUrl: row.parent_url || null,
+        originalHref: row.original_href || null,
+      }));
+
+      // Build canonical tree from pages (same format as exported JSON)
       treeToUse = buildCanonicalSitemapTree(pages);
     }
 
@@ -248,11 +264,25 @@ async function processSitemap(
 }
 
 /**
- * Extract pages from legacy tree format
+ * Extract pages from tree format (JSON viewer format) or exported JSON format
+ * Returns pages in the same format as exported JSON (flat array)
  */
 function extractPagesFromTree(tree) {
   const pages = [];
 
+  // Check if this is the exported JSON format (has 'pages' array)
+  if (tree && tree.pages && Array.isArray(tree.pages)) {
+    // This is the exported JSON format - return pages directly
+    return tree.pages.map((page) => ({
+      url: page.url,
+      title: page.title || "Untitled",
+      depth: page.depth || 0,
+      parentUrl: page.parentUrl || null,
+      originalHref: page.originalHref || null,
+    }));
+  }
+
+  // Otherwise, it's the tree format (JSON viewer format) - traverse it
   function traverse(node, parentUrl = null, depth = 0) {
     if (node.url) {
       pages.push({
@@ -260,6 +290,7 @@ function extractPagesFromTree(tree) {
         title: node.title || "Untitled",
         depth: depth,
         parentUrl: parentUrl,
+        originalHref: node.originalHref || null,
       });
     }
 
