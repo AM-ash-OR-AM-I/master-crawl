@@ -474,7 +474,6 @@ Remember: Do NOT invent new content. Only restructure existing paths.`;
         },
       ],
       max_completion_tokens: MAX_OUTPUT_TOKENS * 2, // Allow more tokens for full sitemap
-      temperature: 0.3,
     });
 
     const content = response.choices[0].message.content;
