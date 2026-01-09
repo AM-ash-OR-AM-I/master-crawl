@@ -107,36 +107,40 @@ router.get("/:jobId", async (req, res) => {
     let sitemapResult = null;
     let sitemapData = null;
     if (includeSitemap) {
+      // Fetch full sitemap when explicitly requested
       sitemapResult = await pool.query(
         "SELECT original_sitemap FROM sitemaps WHERE job_id = $1",
         [jobId]
       );
       if (sitemapResult.rows[0]) {
+        // JSONB columns are already parsed by pg library
         sitemapData = {
           original_sitemap: sitemapResult.rows[0].original_sitemap,
         };
       }
     } else {
       // Even if not including full sitemap, check if it exists and get metadata only
+      // Use PostgreSQL JSONB path query to only extract metadata (more efficient)
       sitemapResult = await pool.query(
-        "SELECT original_sitemap FROM sitemaps WHERE job_id = $1",
+        "SELECT original_sitemap->'_crawlMeta' as metadata FROM sitemaps WHERE job_id = $1",
         [jobId]
       );
-      if (sitemapResult.rows[0] && sitemapResult.rows[0].original_sitemap) {
-        // Parse to extract just metadata, not the full tree
-        try {
-          const fullSitemap = JSON.parse(
-            sitemapResult.rows[0].original_sitemap
-          );
-          // Only include metadata, not the full tree
+      if (sitemapResult.rows[0] && sitemapResult.rows[0].metadata) {
+        // Only include metadata, not the full tree
+        // Always return an object structure so frontend can check _crawlMeta
+        sitemapData = {
+          original_sitemap: { _crawlMeta: sitemapResult.rows[0].metadata },
+        };
+      } else {
+        // Sitemap exists but no metadata - return empty structure
+        const sitemapExists = await pool.query(
+          "SELECT 1 FROM sitemaps WHERE job_id = $1",
+          [jobId]
+        );
+        if (sitemapExists.rows.length > 0) {
           sitemapData = {
-            original_sitemap: fullSitemap._crawlMeta
-              ? { _crawlMeta: fullSitemap._crawlMeta }
-              : null,
+            original_sitemap: { _crawlMeta: null },
           };
-        } catch (e) {
-          // If parsing fails, just indicate sitemap exists
-          sitemapData = { original_sitemap: null };
         }
       }
     }
