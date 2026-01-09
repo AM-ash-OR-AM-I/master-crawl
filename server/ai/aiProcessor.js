@@ -594,7 +594,7 @@ Remember: Do NOT invent new content. Only restructure existing paths.`;
 
 /**
  * Generate single prompt with sitemap data (without calling AI)
- * This generates the prompt that can be used manually in ChatGPT
+ * This generates the prompt that can be used manually in Grok
  */
 function generatePromptsWithData(
   sitemap,
@@ -655,7 +655,7 @@ function generatePromptsWithData(
     // Always use file-based output format
     const userPrompt = `EXECUTION MODE: FILE-BASED OUTPUT (REQUIRED)
 
-This prompt can be used with ChatGPT (chat.openai.com) or Grok (x.ai/grok). Attach the sitemap.json file and paste this prompt.
+This prompt can be used with Grok (x.ai/grok). Attach the sitemap.json file and paste this prompt.
 
 You MUST generate downloadable files to avoid truncation, partial output, or broken JSON.
 

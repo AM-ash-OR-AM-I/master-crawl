@@ -145,15 +145,28 @@ router.get("/:jobId", async (req, res) => {
       }
     }
 
-    // Generate prompts with sitemap data (if sitemap exists and is included)
+    // Always generate prompts with sitemap data (if sitemap exists)
+    // This ensures the prompt is always available in the UI
     let prompts = null;
-    if (includeSitemap && sitemapResult?.rows[0]?.original_sitemap) {
+    let sitemapForPrompt = null;
+
+    // Get sitemap for prompt generation (even if not included in response)
+    if (!includeSitemap) {
+      const promptSitemapResult = await pool.query(
+        "SELECT original_sitemap FROM sitemaps WHERE job_id = $1",
+        [jobId]
+      );
+      if (promptSitemapResult.rows[0]?.original_sitemap) {
+        sitemapForPrompt = promptSitemapResult.rows[0].original_sitemap;
+      }
+    } else if (sitemapResult?.rows[0]?.original_sitemap) {
+      sitemapForPrompt = sitemapResult.rows[0].original_sitemap;
+    }
+
+    // Generate prompts if sitemap exists
+    if (sitemapForPrompt) {
       try {
-        // Try to get canonical tree and issues if available
-        // For now, just pass the sitemap - the function will handle conversion
-        prompts = generatePromptsWithData(
-          sitemapResult.rows[0].original_sitemap
-        );
+        prompts = generatePromptsWithData(sitemapForPrompt);
         console.log("Generated prompts with sitemap data:", {
           hasImprovement: !!prompts.improvement,
         });
@@ -162,7 +175,7 @@ router.get("/:jobId", async (req, res) => {
       }
     }
 
-    // Only include prompts if they exist
+    // Always include prompts if generated (even if empty, so UI can show default)
     const responseData = {
       ...job,
       pagesCount: pagesCount,
@@ -170,7 +183,7 @@ router.get("/:jobId", async (req, res) => {
       recommendations: recsResult.rows || [],
     };
 
-    // Add prompts if they exist
+    // Always add prompts if they exist (should always be generated if sitemap exists)
     if (prompts && prompts.improvement) {
       responseData.prompts = prompts;
     }

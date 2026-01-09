@@ -355,16 +355,15 @@ function JobDetails({ job, onClose }) {
 
           {activeTab === 'recommendations' && (
             <div className="space-y-4">
-              {/* AI Improvement Prompt */}
-              {details.prompts && details.prompts.improvement && (
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="text-lg font-semibold">AI Sitemap Improvement Prompt</h3>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      Copy this prompt and paste it into ChatGPT or Grok to get AI-powered sitemap optimization recommendations. 
-                      The prompt includes your current sitemap structure and detected issues.
-                    </p>
-                  </div>
+              {/* AI Improvement Prompt - Always show */}
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-lg font-semibold">AI Sitemap Improvement Prompt</h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Copy this prompt and paste it into Grok to get AI-powered sitemap optimization recommendations. 
+                    The prompt includes your current sitemap structure and detected issues.
+                  </p>
+                </div>
                   
                   {/* Step-by-step instructions */}
                   <Card className="bg-blue-50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-800">
@@ -373,7 +372,7 @@ function JobDetails({ job, onClose }) {
                         <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                         </svg>
-                        How to Use This Prompt with ChatGPT or Grok
+                        How to Use This Prompt with Grok
                       </h4>
                       <ol className="space-y-3 text-sm">
                         <li className="flex gap-3">
@@ -405,9 +404,9 @@ function JobDetails({ job, onClose }) {
                         <li className="flex gap-3">
                           <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500 text-white flex items-center justify-center text-xs font-semibold">2</span>
                           <div className="flex-1">
-                            <p className="font-medium mb-1">Open ChatGPT or Grok and start a new conversation</p>
+                            <p className="font-medium mb-1">Open Grok and start a new conversation</p>
                             <p className="text-muted-foreground text-xs">
-                              Go to <a href="https://chat.openai.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 underline">chat.openai.com</a> (ChatGPT) or <a href="https://x.ai/grok" target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 underline">x.ai/grok</a> (Grok) and create a new chat session.
+                              Go to <a href="https://x.ai/grok" target="_blank" rel="noopener noreferrer" className="text-blue-600 dark:text-blue-400 underline">x.ai/grok</a> (Grok) and create a new chat session.
                             </p>
                           </div>
                         </li>
@@ -416,7 +415,7 @@ function JobDetails({ job, onClose }) {
                           <div className="flex-1">
                             <p className="font-medium mb-1">Attach the sitemap.json file</p>
                             <p className="text-muted-foreground text-xs mb-2">
-                              In ChatGPT or Grok, click the attachment icon (📎) and upload the downloaded <code className="px-1 py-0.5 bg-muted rounded text-xs">sitemap.json</code> file.
+                              In Grok, click the attachment icon (📎) and upload the downloaded <code className="px-1 py-0.5 bg-muted rounded text-xs">sitemap.json</code> file.
                             </p>
                             <div className="text-xs text-muted-foreground italic">
                               Note: The AI will read the file contents automatically.
@@ -437,7 +436,7 @@ function JobDetails({ job, onClose }) {
                           <div className="flex-1">
                             <p className="font-medium mb-1">Review the AI recommendations</p>
                             <p className="text-muted-foreground text-xs">
-                              ChatGPT or Grok will analyze your sitemap structure and provide recommendations for improvements, including redirect mappings, indexing rules, and an Excel file with the restructured sitemap.
+                              Grok will analyze your sitemap structure and provide recommendations for improvements, including redirect mappings, indexing rules, and an Excel file with the restructured sitemap.
                             </p>
                             <p className="text-xs text-muted-foreground mt-2">
                               Note: If the response stops mid-way, just write "continue" and it will continue the response.
@@ -461,15 +460,20 @@ function JobDetails({ job, onClose }) {
                             e.stopPropagation();
                             const copyToClipboard = async () => {
                               try {
+                                const promptText = details.prompts?.improvement?.fullPrompt || '';
+                                if (!promptText) {
+                                  alert('Prompt not available yet. Please wait for it to load.');
+                                  return;
+                                }
                                 if (navigator.clipboard && navigator.clipboard.writeText) {
-                                  await navigator.clipboard.writeText(details.prompts.improvement.fullPrompt);
+                                  await navigator.clipboard.writeText(promptText);
                                   setCopied({ ...copied, improvement: true });
                                   setTimeout(() => {
                                     setCopied({ ...copied, improvement: false });
                                   }, 2000);
                                 } else {
                                   const textArea = document.createElement('textarea');
-                                  textArea.value = details.prompts.improvement.fullPrompt;
+                                  textArea.value = details.prompts?.improvement?.fullPrompt || '';
                                   textArea.style.position = 'fixed';
                                   textArea.style.left = '-999999px';
                                   document.body.appendChild(textArea);
@@ -513,23 +517,20 @@ function JobDetails({ job, onClose }) {
                         </Button>
                       </div>
                       <pre className="mt-2 p-3 rounded bg-muted text-xs overflow-auto font-mono whitespace-pre-wrap break-words max-h-96">
-                        {details.prompts.improvement.fullPrompt}
+                        {details.prompts?.improvement?.fullPrompt || 'Loading prompt...'}
                       </pre>
                     </CardContent>
                   </Card>
+                  {(!details.prompts || !details.prompts.improvement) && (
+                    <Card>
+                      <CardContent className="p-4">
+                        <p className="text-sm text-muted-foreground">
+                          Prompt is being generated. Please refresh if it doesn't appear shortly.
+                        </p>
+                      </CardContent>
+                    </Card>
+                  )}
                 </div>
-              )}
-              
-              {/* Show message if no prompts available */}
-              {(!details.prompts || !details.prompts.improvement) && (
-                <Card>
-                  <CardContent className="p-4">
-                    <p className="text-sm text-muted-foreground">
-                      No prompts available yet. The prompt will be generated automatically when you view job details after crawling.
-                    </p>
-                  </CardContent>
-                </Card>
-              )}
               
               {/* Recommendations Section */}
               <div className="mt-6">
