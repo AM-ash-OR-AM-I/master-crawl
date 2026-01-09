@@ -438,22 +438,20 @@ function generateExcelSitemap(pages, baseUrl) {
     }
   });
 
-  // Flatten tree in DFS order (to match tree view order)
+  // Flatten tree in DFS order preserving HTML discovery order
   const orderedPages = [];
   const flattenTree = (node, ancestorTitles = []) => {
     orderedPages.push({ page: node, ancestorTitles: [...ancestorTitles] });
 
     const children = childrenMap.get(node.url) || [];
-    // Sort children by title for consistent ordering
-    children.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+    // Don't sort - preserve the order children were discovered in HTML
 
     children.forEach((child) => {
       flattenTree(child, [...ancestorTitles, node.title]);
     });
   };
 
-  // Sort root nodes and flatten
-  rootNodes.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+  // Don't sort root nodes - preserve HTML discovery order
   rootNodes.forEach((root) => flattenTree(root, []));
 
   // Create rows with full hierarchy path (working pages only)
@@ -666,8 +664,10 @@ function generateExcelSitemap(pages, baseUrl) {
  * Get sitemap in requested format
  */
 async function getSitemap(jobId, format = "json") {
+  // Order by depth first (for BFS), then by crawled_at to preserve HTML discovery order
+  // This maintains the order pages were found in HTML (top to bottom)
   const pagesResult = await pool.query(
-    "SELECT url, title, depth, parent_url, original_href FROM pages WHERE job_id = $1 ORDER BY depth, url",
+    "SELECT url, title, depth, parent_url, original_href FROM pages WHERE job_id = $1 ORDER BY depth, crawled_at",
     [jobId]
   );
 

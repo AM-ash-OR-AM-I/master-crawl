@@ -576,23 +576,8 @@ function buildSitemapStructure(pages) {
     }
   }
 
-  // Sort children by depth then title for consistent ordering
-  const sortChildren = (node) => {
-    if (node.children && node.children.length > 0) {
-      node.children.sort((a, b) => {
-        if (a.depth !== b.depth) return a.depth - b.depth;
-        return (a.title || "").localeCompare(b.title || "");
-      });
-      node.children.forEach(sortChildren);
-    }
-  };
-
-  // Sort root nodes and their children
-  rootNodes.sort((a, b) => {
-    if (a.depth !== b.depth) return a.depth - b.depth;
-    return (a.title || "").localeCompare(b.title || "");
-  });
-  rootNodes.forEach(sortChildren);
+  // Don't sort - preserve HTML discovery order
+  // Children are already in the order they were discovered during crawl
 
   // If only one root node, return it directly
   if (rootNodes.length === 1) {

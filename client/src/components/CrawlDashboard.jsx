@@ -164,7 +164,7 @@ function CrawlDashboard({ jobs, onRefresh, onDelete }) {
                       {/* Show warning indicator if completed with errors */}
                       {job.status === 'COMPLETED' && job.error && (
                         <span 
-                          className="text-amber-500" 
+                          className="text-amber-600 dark:text-amber-400" 
                           title={job.error}
                         >
                           <svg
@@ -185,7 +185,7 @@ function CrawlDashboard({ jobs, onRefresh, onDelete }) {
                       {/* Show error indicator if failed */}
                       {job.status === 'FAILED' && (
                         <span 
-                          className="text-red-500" 
+                          className="text-red-600 dark:text-red-400" 
                           title={job.error || 'Crawl failed'}
                         >
                           <svg
